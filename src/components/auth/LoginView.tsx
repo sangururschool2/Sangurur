@@ -220,7 +220,7 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLearnerLoginSuccess }) =
                   <div className="bg-amber-50/95 border border-amber-200 rounded-xl p-2.5 text-[11px] text-amber-950">
                     <p className="font-bold">Server Admin SDK Inactive</p>
                     <p className="mt-0.5 text-amber-900">
-                      Digital ID login requires server-side Firebase Admin SDK access (not available on Starter Tier previews). Staff can sign in immediately via the <strong>Teacher &amp; Staff</strong> tab using Google Sign-In.
+                      Digital ID login requires server-side Firebase Admin SDK access. Staff can sign in immediately via the <strong>Teacher &amp; Staff</strong> tab using Google Sign-In.
                     </p>
                   </div>
                 ) : (

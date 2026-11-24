@@ -13,14 +13,14 @@ Before connecting SDLR to Netlify, verify you have:
 
 1. A **GitHub account** with push/admin access to your SDLR repository.
 2. A **Netlify account** connected to your GitHub account.
-3. Access to the **Firebase Console** for the production Firebase project (`clever-hangar-wwpgt`) and Firestore database (`ai-studio-sangururdigitall-ec614d5a-13b5-4863-bd7d-92f4cb3d80e1`).
+3. Access to the **Firebase Console** for the production Firebase project (`ai-studio-applet-webapp-19cab`) and Firestore database (`ai-studio-remixsangururdig-8ba34e88-20b8-4da3-82c1-c3a1c99313d6`).
 4. **Node.js 22** (configured automatically on Netlify via `netlify.toml`) if testing builds locally.
 
 ---
 
 ## 2. GitHub Repository Connection Instructions
 
-1. Commit and push the prepared SDLR source code (including `netlify.toml`, `netlify/functions/api.ts`, `server/apiApp.ts`, and `.env.example` — **never** `.env`) to your GitHub repository.
+1. Commit and push the prepared SDLR source code (including `netlify.toml`, `netlify/functions/api.ts`, `server/apiApp.ts`, and `.env.example` — **never** `.env` or downloaded service account `.json` files) to your GitHub repository.
 2. Sign in to the **Netlify Dashboard** (`app.netlify.com`).
 3. Click **Add new site** -> **Import an existing project**.
 4. Choose **Deploy with GitHub**, authorize Netlify if prompted, and select your existing SDLR GitHub repository.
@@ -47,30 +47,37 @@ Netlify redirects configured in `netlify.toml`:
 
 ## 4. Required Environment Variables
 
-In Netlify Dashboard go to **Site configuration** -> **Environment variables** -> **Add a variable**, and configure the following **before** triggering the production deploy:
+In Netlify Dashboard go to **Site configuration** -> **Environment variables** -> **Add a variable**, and configure the following **before** triggering a fresh production deploy:
 
-### A. Public Client Variables (`VITE_FIREBASE_*`) — Netlify Scope: **Builds** (or All)
-> Copy exact values from Firebase Console -> Project settings (`clever-hangar-wwpgt`) -> Your web app:
+### A. Public Client Variables (`VITE_FIREBASE_*`) — Scope: **Frontend (Vite Builds)**
+> Used by `src/services/firebase.ts` in the browser. Obtain exact values from **Firebase Console -> Project settings (`ai-studio-applet-webapp-19cab`) -> Your apps** (optional if matching the bundled `firebase-applet-config.json`, recommended to set explicitly in Netlify):
 
-| Variable | Description | Netlify Scope |
+| Variable | Description / Value | Where It Belongs |
 |---|---|---|
-| `VITE_FIREBASE_API_KEY` | Firebase Web API key | Builds (or All) |
-| `VITE_FIREBASE_AUTH_DOMAIN` | Firebase Auth domain (`clever-hangar-wwpgt.firebaseapp.com`) | Builds (or All) |
-| `VITE_FIREBASE_PROJECT_ID` | Firebase project ID (`clever-hangar-wwpgt`) | Builds (or All) |
-| `VITE_FIREBASE_STORAGE_BUCKET` | Firebase storage bucket (`clever-hangar-wwpgt.firebasestorage.app`) | Builds (or All) |
-| `VITE_FIREBASE_MESSAGING_SENDER_ID` | Firebase messaging sender ID | Builds (or All) |
-| `VITE_FIREBASE_APP_ID` | Firebase Web App ID | Builds (or All) |
-| `VITE_FIREBASE_DATABASE_ID` | Named Firestore database ID (`ai-studio-sangururdigitall-ec614d5a-13b5-4863-bd7d-92f4cb3d80e1`) | Builds (or All) |
+| `VITE_FIREBASE_API_KEY` | Firebase Web API key | Frontend (Netlify Scope: **Builds**) |
+| `VITE_FIREBASE_AUTH_DOMAIN` | `ai-studio-applet-webapp-19cab.firebaseapp.com` | Frontend (Netlify Scope: **Builds**) |
+| `VITE_FIREBASE_PROJECT_ID` | `ai-studio-applet-webapp-19cab` | Frontend (Netlify Scope: **Builds**) |
+| `VITE_FIREBASE_STORAGE_BUCKET` | `ai-studio-applet-webapp-19cab.firebasestorage.app` | Frontend (Netlify Scope: **Builds**) |
+| `VITE_FIREBASE_MESSAGING_SENDER_ID` | `710469628945` | Frontend (Netlify Scope: **Builds**) |
+| `VITE_FIREBASE_APP_ID` | Firebase Web App ID | Frontend (Netlify Scope: **Builds**) |
+| `VITE_FIREBASE_DATABASE_ID` | `ai-studio-remixsangururdig-8ba34e88-20b8-4da3-82c1-c3a1c99313d6` | Frontend (Netlify Scope: **Builds**) |
 
-### B. Secret Server-Side Variables — Netlify Scope: **Functions** (Never Prefix with `VITE_`)
+### B. Secret Server-Side Variables — Scope: **Netlify Functions Only (Never Prefix with `VITE_`)**
 
-| Variable | Description | Netlify Scope | Required? |
+| Variable | Description | Where It Belongs | Required? |
 |---|---|---|---|
-| `SESSION_SECRET` | Strong random 32+ character hex secret (`openssl rand -hex 32`) for HMAC-SHA256 teacher/learner session tokens across serverless cold starts | **Functions** | **Yes (Required in Production)** |
-| `FIREBASE_SERVICE_ACCOUNT_JSON` | Single-line JSON credentials from Firebase Console -> Project settings (`clever-hangar-wwpgt`) -> Service accounts -> Generate new private key (used by `firebase-admin` in Netlify Functions) | **Functions** | **Yes (Required under Hardened Rules)** |
-| `DEFAULT_TEACHER_PASSWORD` | Password used only when bootstrapping `teacherCredentials/teacher_default_staff` if it does not yet exist | **Functions** | Recommended |
-| `APP_URL` | Full HTTPS URL of your deployed Netlify site | Functions / Runtime | Optional |
+| `FIREBASE_SERVICE_ACCOUNT_JSON` | Complete single-line service account JSON from Firebase Console -> Project settings (`ai-studio-applet-webapp-19cab`) -> Service accounts -> Generate new private key | **Netlify Functions** (Secret) | **Yes (Required)** |
+| `SESSION_SECRET` | Strong random 32+ character hex secret (`openssl rand -hex 32`) for HMAC-SHA256 teacher/learner session tokens across serverless invocations | **Netlify Functions** (Secret) | **Yes (Required)** |
+| `DEFAULT_TEACHER_PASSWORD` | Initial password used when bootstrapping `teacherCredentials/teacher_default_staff` if it does not yet exist | **Netlify Functions** (Secret) | Recommended |
+| `FIREBASE_PROJECT_ID` | Optional override for `ai-studio-applet-webapp-19cab` | **Netlify Functions** | Optional |
+| `FIREBASE_DATABASE_ID` | Optional override for `ai-studio-remixsangururdig-8ba34e88-20b8-4da3-82c1-c3a1c99313d6` | **Netlify Functions** | Optional |
+| `APP_URL` | Full HTTPS URL of your deployed Netlify site | **Netlify Functions** | Optional |
 
+#### Formatting `FIREBASE_SERVICE_ACCOUNT_JSON` for Netlify
+1. In **Firebase Console** -> select project **`ai-studio-applet-webapp-19cab`** -> **Project settings** -> **Service accounts** -> **Generate new private key** to download the `.json` file.
+   - *Note:* If your project is still on a managed starter tier that restricts service account key creation in IAM, first claim/upgrade ownership of the project in Google Cloud Console (`https://console.cloud.google.com/welcome`) or use a Firebase project you own and update the project ID/config accordingly.
+2. Compact the downloaded JSON onto a **single line** (preserve the `\n` escapes inside `"private_key"`, e.g. `jq -c . serviceAccountKey.json`), and paste the raw JSON object `{...}` directly as the value of `FIREBASE_SERVICE_ACCOUNT_JSON` in Netlify (do **not** wrap it in extra quotes).
+3. Restrict the variable scope in Netlify to **Functions** (and **Never** prefix it with `VITE_`).
 
 ---
 
@@ -80,7 +87,7 @@ Firebase Authentication **blocks Google Sign-In (`auth/unauthorized-domain`)** f
 
 After Netlify assigns your site domain (and after adding any custom domain):
 
-1. Open **Firebase Console** -> select project **`clever-hangar-wwpgt`**.
+1. Open **Firebase Console** -> select project **`ai-studio-applet-webapp-19cab`**.
 2. Go to **Authentication** -> **Settings** -> **Authorized domains**.
 3. Click **Add domain** and add:
    - Your Netlify default subdomain (e.g. `<your-site-name>.netlify.app`)
@@ -91,9 +98,9 @@ After Netlify assigns your site domain (and after adding any custom domain):
 
 ## 6. Production Firebase Setup Checklist
 
-1. **Named Firestore Database:** Ensure the app connects to `ai-studio-sangururdigitall-ec614d5a-13b5-4863-bd7d-92f4cb3d80e1` (already configured in `VITE_FIREBASE_DATABASE_ID` and `firebase-applet-config.json`).
+1. **Named Firestore Database:** Ensure the app connects to `ai-studio-remixsangururdig-8ba34e88-20b8-4da3-82c1-c3a1c99313d6` (already configured in `firebase-applet-config.json` and `VITE_FIREBASE_DATABASE_ID`).
 2. **Firestore Security Rules (`firestore.rules`):** Ensure the latest hardened `firestore.rules` are deployed to Firebase (`firebase deploy --only firestore:rules` or via AI Studio deployment). `teacherCredentials` and `counters` are locked (`allow read, write: if false`) for client SDKs and served exclusively via Firebase Admin SDK.
-3. **Firebase Storage (`storage.rules`):** If your deployment uses file/asset uploads in Firebase Storage (`clever-hangar-wwpgt.firebasestorage.app`), enable Storage in **Firebase Console -> Storage -> Get started** and deploy `storage.rules` (`firebase deploy --only storage`).
+3. **Firebase Storage (`storage.rules`):** If your deployment uses file/asset uploads in Firebase Storage (`ai-studio-applet-webapp-19cab.firebasestorage.app`), enable Storage in **Firebase Console -> Storage -> Get started** and deploy `storage.rules` (`firebase deploy --only storage`).
 4. **Firebase Authentication Providers:** Confirm **Google** sign-in provider is enabled in Firebase Authentication -> Sign-in method.
 5. **No Emulators Active:** Confirm no emulator environment variables or `connectFirestoreEmulator` / `connectAuthEmulator` calls exist (verified clean in SDLR source).
 6. **Initial Admin Account:** Confirm `sangururschool10@gmail.com` or authorized staff Google accounts can sign in cleanly, and rotate default staff/learner passwords after onboarding.
@@ -114,11 +121,13 @@ To attach a custom school domain later in Netlify:
 
 ## 8. Deployment Instructions
 
+> **Important:** A **fresh deployment is required** after changing code or adding/updating Netlify environment variables (`FIREBASE_SERVICE_ACCOUNT_JSON`, `SESSION_SECRET`, `VITE_*`), because Netlify injects `VITE_*` variables at build time and snapshots function configuration per deploy.
+
 1. Confirm all Environment Variables (Section 4) are saved in Netlify.
-2. Trigger a deploy from Netlify Dashboard -> **Deploys** -> **Trigger deploy** -> **Clear cache and deploy site** (or push a commit to your production GitHub branch).
+2. Push your updated code and trigger a fresh deploy in Netlify Dashboard -> **Deploys** -> **Trigger deploy** -> **Clear cache and deploy site**.
 3. Monitor the build log until `vite build` outputs `dist/` and Netlify Functions bundles `netlify/functions/api.ts`.
 4. Verify the live site immediately after deploy:
-   - Visit `https://<your-site>/api/health` -> verify JSON returns `"status": "ok"`, `"timezone": "Africa/Nairobi"`, and `"firestoreConfigured": true`.
+   - Visit `https://<your-site>/api/health` -> verify JSON returns `"status": "ok"`, `"adminSdkActive": true`, `"firestoreConfigured": true`, `"sessionSecretConfigured": true`, and `"projectId": "ai-studio-applet-webapp-19cab"`.
    - Test direct SPA reload on a sub-path (should return `200 OK`, not `404`).
    - Verify Sangurur Comprehensive School logo, Motto (`Think, Code, Change the World`), and classroom backgrounds load cleanly.
    - Test Staff Teacher login (Username/Password + Google Staff Sign-In after adding Authorized Domain).
@@ -128,6 +137,9 @@ To attach a custom school domain later in Netlify:
 
 ## 9. Troubleshooting Steps
 
+- **`HTTP 503` on `/api/auth/teacher-login` with `MISSING_SERVICE_ACCOUNT_JSON` or `INVALID_SERVICE_ACCOUNT_JSON`:**
+  - Check `/api/health` -> inspect `adminInitErrorCode` and `adminInitErrorMessage`.
+  - Confirm `FIREBASE_SERVICE_ACCOUNT_JSON` is set in Netlify **Environment variables** with **Functions** scope, formatted as a valid single-line JSON object without extra outer quotes, and that you triggered a **fresh deploy** afterwards.
 - **`auth/unauthorized-domain` during Google Sign-In:**
   - Add your exact `.netlify.app` or custom domain to Firebase Authentication -> Settings -> Authorized domains (Section 5).
 - **API calls return HTML (`index.html`) or 404:**
@@ -135,9 +147,9 @@ To attach a custom school domain later in Netlify:
 - **Teacher/Learner sessions unexpectedly log out across requests:**
   - Ensure `SESSION_SECRET` is set to a fixed 32+ character secret in Netlify Environment Variables (do not leave blank).
 - **Protected staff actions return `401 Staff authentication required`:**
-  - Ensure the staff user refreshes their session / signs in again so `Authorization: Bearer <token>` is sent, and confirm `VITE_FIREBASE_API_KEY` matches project `clever-hangar-wwpgt`.
+  - Ensure the staff user refreshes their session / signs in again so `Authorization: Bearer <token>` is sent, and confirm `VITE_FIREBASE_API_KEY` matches project `ai-studio-applet-webapp-19cab`.
 - **Missing database records or permission denied:**
-  - Verify `VITE_FIREBASE_DATABASE_ID` matches `ai-studio-sangururdigitall-ec614d5a-13b5-4863-bd7d-92f4cb3d80e1` and `firestore.rules` are deployed to Firebase.
+  - Verify `VITE_FIREBASE_DATABASE_ID` matches `ai-studio-remixsangururdig-8ba34e88-20b8-4da3-82c1-c3a1c99313d6` and `firestore.rules` are deployed to Firebase.
 
 ---
 

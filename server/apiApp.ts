@@ -1,24 +1,9 @@
 import express, { Request, Response, NextFunction, Express } from 'express';
 import path from 'path';
 import os from 'os';
-import { fileURLToPath } from 'url';
 import crypto from 'crypto';
 import fs from 'fs';
 import dotenv from 'dotenv';
-import { initializeApp, getApps, FirebaseApp } from 'firebase/app';
-import {
-  getFirestore,
-  doc,
-  getDoc,
-  setDoc,
-  updateDoc,
-  collection,
-  query,
-  where,
-  getDocs,
-  runTransaction,
-  Firestore,
-} from 'firebase/firestore';
 import {
   initializeApp as initializeAdminApp,
   getApps as getAdminApps,
@@ -33,9 +18,6 @@ import { getAuth as getAdminAuth, Auth as AdminAuth } from 'firebase-admin/auth'
 
 dotenv.config();
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
 interface FirebaseWebConfig {
   projectId: string;
   appId: string;
@@ -46,12 +28,24 @@ interface FirebaseWebConfig {
   messagingSenderId?: string;
 }
 
-function loadFirebaseConfig(): FirebaseWebConfig {
+function getConfigFileCandidates(): string[] {
   const candidates = [
     path.resolve(process.cwd(), 'firebase-applet-config.json'),
-    path.resolve(__dirname, '..', 'firebase-applet-config.json'),
-    path.resolve(__dirname, 'firebase-applet-config.json'),
+    path.resolve(process.cwd(), '..', 'firebase-applet-config.json'),
   ];
+  // In CommonJS builds (e.g. Netlify esbuild), __dirname is defined without needing import.meta.url
+  if (typeof __dirname === 'string' && __dirname.length > 0) {
+    candidates.push(
+      path.resolve(__dirname, 'firebase-applet-config.json'),
+      path.resolve(__dirname, '..', 'firebase-applet-config.json'),
+      path.resolve(__dirname, '..', '..', 'firebase-applet-config.json')
+    );
+  }
+  return Array.from(new Set(candidates));
+}
+
+function loadFirebaseConfig(): FirebaseWebConfig {
+  const candidates = getConfigFileCandidates();
 
   let fileConfig: Partial<FirebaseWebConfig> = {};
   for (const candidate of candidates) {
@@ -180,7 +174,7 @@ interface DocSnapshotLike {
 }
 
 interface ServerDbAdapter {
-  mode: 'admin' | 'client';
+  mode: 'admin';
   getDoc: (colName: string, docId: string) => Promise<DocSnapshotLike>;
   setDoc: (colName: string, docId: string, data: Record<string, any>) => Promise<void>;
   updateDoc: (colName: string, docId: string, data: Record<string, any>) => Promise<void>;
@@ -197,166 +191,294 @@ interface ServerDbAdapter {
   ) => Promise<T>;
 }
 
+type AdminInitErrorCode =
+  | 'NONE'
+  | 'MISSING_SERVICE_ACCOUNT_JSON'
+  | 'INVALID_SERVICE_ACCOUNT_JSON'
+  | 'INVALID_SERVICE_ACCOUNT_CREDENTIALS'
+  | 'FIREBASE_ADMIN_INIT_FAILED';
+
+interface AdminInitState {
+  ok: boolean;
+  errorCode: AdminInitErrorCode;
+  errorMessage: string | null;
+}
+
 let cachedAdminApp: AdminApp | null = null;
 let cachedAdminDb: AdminFirestore | null = null;
 let cachedAdminAuth: AdminAuth | null = null;
-let cachedClientDb: Firestore | null = null;
+let lastAdminInitState: AdminInitState = {
+  ok: false,
+  errorCode: 'MISSING_SERVICE_ACCOUNT_JSON',
+  errorMessage: 'Firebase Admin SDK has not been initialized yet.',
+};
 
-function initAdminServices(): { adminDb: AdminFirestore; adminAuth: AdminAuth } | null {
+function parseServiceAccountJson(rawEnv: string): {
+  parsed?: Record<string, unknown>;
+  errorCode?: AdminInitErrorCode;
+  errorMessage?: string;
+} {
+  let candidate = rawEnv.trim();
+
+  // Strip accidental single wrapping quotes pasted into hosting UI
+  if (
+    (candidate.startsWith("'") && candidate.endsWith("'")) ||
+    (candidate.startsWith('"') && candidate.endsWith('"') && !candidate.startsWith('"{'))
+  ) {
+    candidate = candidate.slice(1, -1).trim();
+  }
+
+  let parsedUnknown: unknown;
+  try {
+    parsedUnknown = JSON.parse(candidate);
+    // Support double-encoded JSON strings (e.g. "\"{...}\"")
+    if (typeof parsedUnknown === 'string') {
+      parsedUnknown = JSON.parse(parsedUnknown);
+    }
+  } catch {
+    return {
+      errorCode: 'INVALID_SERVICE_ACCOUNT_JSON',
+      errorMessage:
+        'FIREBASE_SERVICE_ACCOUNT_JSON is not valid JSON. Paste the complete raw Firebase service account JSON without extra outer quotes or truncation.',
+    };
+  }
+
+  if (!parsedUnknown || typeof parsedUnknown !== 'object' || Array.isArray(parsedUnknown)) {
+    return {
+      errorCode: 'INVALID_SERVICE_ACCOUNT_CREDENTIALS',
+      errorMessage:
+        'FIREBASE_SERVICE_ACCOUNT_JSON must be a JSON object downloaded from Firebase Console -> Project settings -> Service accounts.',
+    };
+  }
+
+  return { parsed: parsedUnknown as Record<string, unknown> };
+}
+
+function initAdminServices(): {
+  adminDb: AdminFirestore | null;
+  adminAuth: AdminAuth | null;
+  initState: AdminInitState;
+} {
   if (cachedAdminDb && cachedAdminAuth) {
-    return { adminDb: cachedAdminDb, adminAuth: cachedAdminAuth };
+    return {
+      adminDb: cachedAdminDb,
+      adminAuth: cachedAdminAuth,
+      initState: { ok: true, errorCode: 'NONE', errorMessage: null },
+    };
   }
 
   const rawJson = process.env.FIREBASE_SERVICE_ACCOUNT_JSON?.trim();
-  if (!rawJson) return null;
+  if (!rawJson) {
+    lastAdminInitState = {
+      ok: false,
+      errorCode: 'MISSING_SERVICE_ACCOUNT_JSON',
+      errorMessage:
+        'Server-side Firebase Admin SDK is not configured: FIREBASE_SERVICE_ACCOUNT_JSON is missing from Netlify environment variables.',
+    };
+    return { adminDb: null, adminAuth: null, initState: lastAdminInitState };
+  }
+
+  const parseResult = parseServiceAccountJson(rawJson);
+  if (!parseResult.parsed) {
+    lastAdminInitState = {
+      ok: false,
+      errorCode: parseResult.errorCode || 'INVALID_SERVICE_ACCOUNT_JSON',
+      errorMessage:
+        parseResult.errorMessage || 'FIREBASE_SERVICE_ACCOUNT_JSON could not be parsed.',
+    };
+    console.error(`[SDLR Admin SDK] ${lastAdminInitState.errorCode}: ${lastAdminInitState.errorMessage}`);
+    return { adminDb: null, adminAuth: null, initState: lastAdminInitState };
+  }
+
+  const parsed = parseResult.parsed;
+  if (parsed.type && parsed.type !== 'service_account') {
+    lastAdminInitState = {
+      ok: false,
+      errorCode: 'INVALID_SERVICE_ACCOUNT_CREDENTIALS',
+      errorMessage:
+        'FIREBASE_SERVICE_ACCOUNT_JSON has an invalid credential type. Expected "service_account" JSON.',
+    };
+    console.error(`[SDLR Admin SDK] ${lastAdminInitState.errorCode}: ${lastAdminInitState.errorMessage}`);
+    return { adminDb: null, adminAuth: null, initState: lastAdminInitState };
+  }
+
+  const serviceProjectId = String(parsed.project_id || parsed.projectId || '').trim();
+  const clientEmail = String(parsed.client_email || parsed.clientEmail || '').trim();
+  const rawPrivateKey = String(parsed.private_key || parsed.privateKey || '');
+  const privateKey = rawPrivateKey.replace(/\\n/g, '\n').trim();
+
+  if (!serviceProjectId || !clientEmail || !privateKey) {
+    lastAdminInitState = {
+      ok: false,
+      errorCode: 'INVALID_SERVICE_ACCOUNT_CREDENTIALS',
+      errorMessage:
+        'FIREBASE_SERVICE_ACCOUNT_JSON is missing required fields (project_id, client_email, or private_key).',
+    };
+    console.error(`[SDLR Admin SDK] ${lastAdminInitState.errorCode}: ${lastAdminInitState.errorMessage}`);
+    return { adminDb: null, adminAuth: null, initState: lastAdminInitState };
+  }
+
+  if (!clientEmail.includes('@') || !privateKey.includes('-----BEGIN') || !privateKey.includes('PRIVATE KEY-----')) {
+    lastAdminInitState = {
+      ok: false,
+      errorCode: 'INVALID_SERVICE_ACCOUNT_CREDENTIALS',
+      errorMessage:
+        'FIREBASE_SERVICE_ACCOUNT_JSON contains a malformed client_email or private_key PEM block.',
+    };
+    console.error(`[SDLR Admin SDK] ${lastAdminInitState.errorCode}: ${lastAdminInitState.errorMessage}`);
+    return { adminDb: null, adminAuth: null, initState: lastAdminInitState };
+  }
+
+  const targetProjectId = firebaseConfig.projectId || serviceProjectId;
+  if (firebaseConfig.projectId && serviceProjectId !== firebaseConfig.projectId) {
+    lastAdminInitState = {
+      ok: false,
+      errorCode: 'INVALID_SERVICE_ACCOUNT_CREDENTIALS',
+      errorMessage: `Service account project_id ("${serviceProjectId}") does not match configured Firebase project ("${firebaseConfig.projectId}"). Generate a service account key for "${firebaseConfig.projectId}".`,
+    };
+    console.error(`[SDLR Admin SDK] ${lastAdminInitState.errorCode}: ${lastAdminInitState.errorMessage}`);
+    return { adminDb: null, adminAuth: null, initState: lastAdminInitState };
+  }
 
   try {
-    const parsed = JSON.parse(rawJson);
-    if (typeof parsed.private_key === 'string') {
-      parsed.private_key = parsed.private_key.replace(/\\n/g, '\n');
-    }
-
     const existing = getAdminApps().find((a) => a.name === 'SDLR_ADMIN_APP');
     cachedAdminApp =
       existing ||
       initializeAdminApp(
         {
-          credential: cert(parsed),
-          projectId: firebaseConfig.projectId || parsed.project_id,
-          storageBucket: firebaseConfig.storageBucket,
+          credential: cert({
+            projectId: serviceProjectId,
+            clientEmail,
+            privateKey,
+          }),
+          projectId: targetProjectId,
+          ...(firebaseConfig.storageBucket ? { storageBucket: firebaseConfig.storageBucket } : {}),
         },
         'SDLR_ADMIN_APP'
       );
 
-    cachedAdminDb = getAdminFirestore(cachedAdminApp, firebaseConfig.firestoreDatabaseId);
+    const dbId = firebaseConfig.firestoreDatabaseId?.trim();
+    cachedAdminDb =
+      dbId && dbId !== '(default)'
+        ? getAdminFirestore(cachedAdminApp, dbId)
+        : getAdminFirestore(cachedAdminApp);
     cachedAdminAuth = getAdminAuth(cachedAdminApp);
-    return { adminDb: cachedAdminDb, adminAuth: cachedAdminAuth };
-  } catch (err) {
-    console.error('Could not initialize Firebase Admin SDK from FIREBASE_SERVICE_ACCOUNT_JSON:', err);
-    return null;
-  }
-}
 
-function getClientDb(): Firestore | null {
-  if (cachedClientDb) return cachedClientDb;
-  if (!firebaseConfig.projectId || !firebaseConfig.apiKey) {
-    console.warn('Could not initialize server Firestore: missing Firebase configuration');
-    return null;
-  }
-  try {
-    const existingApp = getApps().find((a: FirebaseApp) => a.name === 'SERVER_APP') || getApps()[0];
-    const fbApp = existingApp || initializeApp(firebaseConfig, 'SERVER_APP');
-    cachedClientDb = getFirestore(fbApp, firebaseConfig.firestoreDatabaseId);
-    return cachedClientDb;
-  } catch (e) {
-    console.warn('Could not initialize server Firestore from config:', e);
-    return null;
-  }
-}
-
-function getServerDbAdapter(): { db: ServerDbAdapter | null; adminAuth: AdminAuth | null } {
-  const adminServices = initAdminServices();
-  if (adminServices) {
-    const { adminDb, adminAuth } = adminServices;
-    const adapter: ServerDbAdapter = {
-      mode: 'admin',
-      async getDoc(colName, docId) {
-        const snap = await adminDb.collection(colName).doc(docId).get();
-        return {
-          exists: snap.exists,
-          id: snap.id,
-          data: () => snap.data(),
-        };
-      },
-      async setDoc(colName, docId, data) {
-        await adminDb.collection(colName).doc(docId).set(data);
-      },
-      async updateDoc(colName, docId, data) {
-        await adminDb.collection(colName).doc(docId).update(data);
-      },
-      async getCollectionDocs(colName) {
-        const snap = await adminDb.collection(colName).get();
-        return snap.docs.map((d) => ({ id: d.id, data: () => d.data() }));
-      },
-      async queryWhere(colName, filters) {
-        let q: FirebaseFirestore.Query = adminDb.collection(colName);
-        for (const [field, op, val] of filters) {
-          q = q.where(field, op, val);
-        }
-        const snap = await q.get();
-        return snap.docs.map((d) => ({ id: d.id, data: () => d.data() }));
-      },
-      async runTransaction(fn) {
-        return adminDb.runTransaction(async (tx) => {
-          const wrappedTx = {
-            async get(colName: string, docId: string): Promise<DocSnapshotLike> {
-              const snap = await tx.get(adminDb.collection(colName).doc(docId));
-              return { exists: snap.exists, id: snap.id, data: () => snap.data() };
-            },
-            set(colName: string, docId: string, data: Record<string, any>) {
-              tx.set(adminDb.collection(colName).doc(docId), data);
-            },
-          };
-          return fn(wrappedTx);
-        });
-      },
+    lastAdminInitState = {
+      ok: true,
+      errorCode: 'NONE',
+      errorMessage: null,
     };
-    return { db: adapter, adminAuth };
+    return {
+      adminDb: cachedAdminDb,
+      adminAuth: cachedAdminAuth,
+      initState: lastAdminInitState,
+    };
+  } catch (err: any) {
+    cachedAdminApp = null;
+    cachedAdminDb = null;
+    cachedAdminAuth = null;
+    const reason = err instanceof Error ? err.message : 'Unknown initialization error';
+    console.error(`[SDLR Admin SDK] FIREBASE_ADMIN_INIT_FAILED: ${reason}`);
+    lastAdminInitState = {
+      ok: false,
+      errorCode: 'FIREBASE_ADMIN_INIT_FAILED',
+      errorMessage:
+        'Firebase Admin SDK failed to initialize with the provided FIREBASE_SERVICE_ACCOUNT_JSON credentials. Verify the service account key is valid and not revoked.',
+    };
+    return { adminDb: null, adminAuth: null, initState: lastAdminInitState };
   }
+}
 
-  const clientDb = getClientDb();
-  if (!clientDb) return { db: null, adminAuth: null };
+function getServerDbAdapter(): {
+  db: ServerDbAdapter | null;
+  adminAuth: AdminAuth | null;
+  initState: AdminInitState;
+} {
+  const { adminDb, adminAuth, initState } = initAdminServices();
+  if (!adminDb || !adminAuth) {
+    return { db: null, adminAuth: null, initState };
+  }
 
   const adapter: ServerDbAdapter = {
-    mode: 'client',
+    mode: 'admin',
     async getDoc(colName, docId) {
-      const snap = await getDoc(doc(clientDb, colName, docId));
+      const snap = await adminDb.collection(colName).doc(docId).get();
       return {
-        exists: snap.exists(),
+        exists: snap.exists,
         id: snap.id,
         data: () => snap.data(),
       };
     },
     async setDoc(colName, docId, data) {
-      await setDoc(doc(clientDb, colName, docId), data);
+      await adminDb.collection(colName).doc(docId).set(data);
     },
     async updateDoc(colName, docId, data) {
-      await updateDoc(doc(clientDb, colName, docId), data);
+      await adminDb.collection(colName).doc(docId).update(data);
     },
     async getCollectionDocs(colName) {
-      const snap = await getDocs(collection(clientDb, colName));
+      const snap = await adminDb.collection(colName).get();
       return snap.docs.map((d) => ({ id: d.id, data: () => d.data() }));
     },
     async queryWhere(colName, filters) {
-      let q: any = collection(clientDb, colName);
+      let q: FirebaseFirestore.Query = adminDb.collection(colName);
       for (const [field, op, val] of filters) {
-        q = query(q, where(field, op, val));
+        q = q.where(field, op, val);
       }
-      const snap = await getDocs(q);
-      return snap.docs.map((d: any) => ({ id: d.id, data: () => d.data() }));
+      const snap = await q.get();
+      return snap.docs.map((d) => ({ id: d.id, data: () => d.data() }));
     },
     async runTransaction(fn) {
-      return runTransaction(clientDb, async (tx) => {
+      return adminDb.runTransaction(async (tx) => {
         const wrappedTx = {
           async get(colName: string, docId: string): Promise<DocSnapshotLike> {
-            const snap = await tx.get(doc(clientDb, colName, docId));
-            return { exists: snap.exists(), id: snap.id, data: () => snap.data() };
+            const snap = await tx.get(adminDb.collection(colName).doc(docId));
+            return { exists: snap.exists, id: snap.id, data: () => snap.data() };
           },
           set(colName: string, docId: string, data: Record<string, any>) {
-            tx.set(doc(clientDb, colName, docId), data);
+            tx.set(adminDb.collection(colName).doc(docId), data);
           },
         };
         return fn(wrappedTx);
       });
     },
   };
-  return { db: adapter, adminAuth: null };
+  return { db: adapter, adminAuth, initState };
 }
 
-function formatServerFirestoreError(err: any, db: ServerDbAdapter | null, fallbackMsg: string): { status: number; message: string } {
+function formatServerFirestoreError(
+  err: any,
+  db: ServerDbAdapter | null,
+  fallbackMsg: string
+): { status: number; message: string; code?: string } {
   const msg = String(err?.message || err || '');
   const code = String(err?.code || '');
+
   if (
+    msg.includes('UNAUTHENTICATED') ||
+    msg.includes('invalid_grant') ||
+    msg.includes('DECODER routines') ||
+    msg.includes('Invalid JWT Signature')
+  ) {
+    return {
+      status: 503,
+      code: 'FIREBASE_ADMIN_AUTH_FAILED',
+      message:
+        'Firebase Admin SDK credentials were rejected by Google Auth. Ensure FIREBASE_SERVICE_ACCOUNT_JSON contains an active, unrevoked key for project ai-studio-applet-webapp-19cab.',
+    };
+  }
+
+  if (code === '5' || code === 'not-found' || msg.includes('NOT_FOUND')) {
+    return {
+      status: 503,
+      code: 'FIRESTORE_DATABASE_NOT_FOUND',
+      message:
+        'Configured Firestore database was not found. Verify FIREBASE_DATABASE_ID matches your Firebase project database ID.',
+    };
+  }
+
+  if (
+    code === '7' ||
     code === 'permission-denied' ||
     msg.includes('PERMISSION_DENIED') ||
     msg.includes('Missing or insufficient permissions')
@@ -364,15 +486,19 @@ function formatServerFirestoreError(err: any, db: ServerDbAdapter | null, fallba
     if (db?.mode !== 'admin') {
       return {
         status: 503,
+        code: 'MISSING_ADMIN_SDK',
         message:
-          'Server Firestore access was denied by security rules. Configure FIREBASE_SERVICE_ACCOUNT_JSON in Netlify Environment Variables (or sign in with Google Staff Account).',
+          'Server-side Firebase Admin SDK is not configured. Set FIREBASE_SERVICE_ACCOUNT_JSON in Netlify Environment Variables (or sign in with Google Staff Account).',
       };
     }
     return {
       status: 403,
-      message: 'Firestore security rules denied this server operation.',
+      code: 'FIRESTORE_PERMISSION_DENIED',
+      message:
+        'Firebase Admin service account lacks Firestore IAM permissions. Grant Cloud Datastore User or Firebase Admin role in Google Cloud IAM.',
     };
   }
+
   return {
     status: 500,
     message: msg || fallbackMsg,
@@ -578,7 +704,8 @@ async function ensureDefaultTeacherAccount(db: ServerDbAdapter | null): Promise<
       }
       defaultTeacherEnsured = true;
     } catch (err) {
-      console.warn('Default teacher bootstrap notice:', err);
+      console.error('Default teacher bootstrap error:', err);
+      throw err;
     } finally {
       defaultTeacherBootstrapPromise = null;
     }
@@ -651,23 +778,46 @@ async function writeAuditLog(
   }
 }
 
-export function createApiApp(): Express {
+export function createApiApp(options?: { isServerless?: boolean }): Express {
   const app = express();
-  const { db, adminAuth } = getServerDbAdapter();
+  const isServerless = Boolean(options?.isServerless);
 
   app.set('trust proxy', 1);
   app.use(express.json({ limit: '4mb' }));
 
   // Normalize incoming Netlify Functions path (/.netlify/functions/api/...) -> /api/...
+  // and guarantee req.body is safely parsed even under raw serverless-http payloads
   app.use((req: Request, _res: Response, next: NextFunction) => {
     if (req.url.startsWith('/.netlify/functions/api')) {
       const suffix = req.url.slice('/.netlify/functions/api'.length);
       req.url = suffix ? `/api${suffix.startsWith('/') ? suffix : `/${suffix}`}` : '/api';
+    } else if (isServerless && !req.url.startsWith('/api')) {
+      req.url = `/api${req.url.startsWith('/') ? req.url : `/${req.url}`}`;
     }
+
+    if (Buffer.isBuffer(req.body)) {
+      try {
+        const text = req.body.toString('utf-8').trim();
+        req.body = text ? JSON.parse(text) : {};
+      } catch {
+        req.body = {};
+      }
+    } else if (typeof req.body === 'string') {
+      try {
+        const text = req.body.trim();
+        req.body = text ? JSON.parse(text) : {};
+      } catch {
+        req.body = {};
+      }
+    } else if (!req.body || typeof req.body !== 'object') {
+      req.body = {};
+    }
+
     next();
   });
 
   async function requireLearnerAuth(req: AuthenticatedLearnerRequest, res: Response, next: NextFunction) {
+    const { db, initState } = getServerDbAdapter();
     try {
       const authHeader = req.headers.authorization || '';
       const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
@@ -679,7 +829,10 @@ export function createApiApp(): Express {
         return res.status(401).json({ error: 'Session expired or invalid. Please sign in again.' });
       }
       if (!db || db.mode !== 'admin') {
-        return res.status(503).json({ error: 'Server-side Firebase Admin SDK is not configured in this environment.' });
+        return res.status(503).json({
+          error: initState.errorMessage || 'Server-side Firebase Admin SDK is not configured in this environment.',
+          code: initState.errorCode,
+        });
       }
       const snap = await db.getDoc('learners', payload.sub);
       if (!snap.exists) {
@@ -710,11 +863,12 @@ export function createApiApp(): Express {
       next();
     } catch (err: any) {
       const formatted = formatServerFirestoreError(err, db, 'Session validation error');
-      return res.status(formatted.status).json({ error: formatted.message });
+      return res.status(formatted.status).json({ error: formatted.message, code: formatted.code });
     }
   }
 
   async function requireTeacherAuth(req: AuthenticatedTeacherRequest, res: Response, next: NextFunction) {
+    const { db, adminAuth, initState } = getServerDbAdapter();
     try {
       const authHeader = req.headers.authorization || '';
       const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
@@ -722,7 +876,10 @@ export function createApiApp(): Express {
         return res.status(401).json({ error: 'Staff authentication required. Please sign in again.' });
       }
       if (!db || db.mode !== 'admin') {
-        return res.status(503).json({ error: 'Server-side Firebase Admin SDK is not configured in this environment.' });
+        return res.status(503).json({
+          error: initState.errorMessage || 'Server-side Firebase Admin SDK is not configured in this environment.',
+          code: initState.errorCode,
+        });
       }
 
       const staffPayload = verifyTeacherSessionToken(token);
@@ -773,12 +930,13 @@ export function createApiApp(): Express {
       return next();
     } catch (err: any) {
       const formatted = formatServerFirestoreError(err, db, 'Staff authorization error');
-      return res.status(formatted.status).json({ error: formatted.message });
+      return res.status(formatted.status).json({ error: formatted.message, code: formatted.code });
     }
   }
 
   // Health Check
   app.get('/api/health', (_req: Request, res: Response) => {
+    const { db, adminAuth, initState } = getServerDbAdapter();
     res.json({
       status: 'ok',
       app: 'Sangurur Digital Learner Register (SDLR)',
@@ -790,14 +948,18 @@ export function createApiApp(): Express {
       firestoreDatabaseId: firebaseConfig.firestoreDatabaseId || null,
       storageBucket: firebaseConfig.storageBucket || null,
       firestoreConfigured: Boolean(db),
-      adminSdkActive: Boolean(adminAuth),
+      adminSdkActive: Boolean(db && adminAuth),
+      adminInitErrorCode: initState.ok ? null : initState.errorCode,
+      adminInitErrorMessage: initState.ok ? null : initState.errorMessage,
       sessionSecretConfigured: SESSION_SECRET_CONFIGURED,
+      isNetlify: process.env.NETLIFY === 'true',
     });
   });
 
   // Explicit Stateless Session Revocation on Logout
   app.post('/api/auth/logout', async (req: Request, res: Response) => {
     try {
+      const { db } = getServerDbAdapter();
       const authHeader = req.headers.authorization || '';
       const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
       if (!token || !db) {
@@ -822,14 +984,15 @@ export function createApiApp(): Express {
 
   // Teacher Authentication: Username + Password Login
   app.post('/api/auth/teacher-login', async (req: Request, res: Response) => {
+    const { db, adminAuth, initState } = getServerDbAdapter();
     try {
       if (IS_PRODUCTION && !SESSION_SECRET_CONFIGURED) {
         return res.status(503).json({
           error: 'Server SESSION_SECRET is not configured. Set a 32+ character SESSION_SECRET in Netlify Environment Variables.',
+          code: 'MISSING_SESSION_SECRET',
         });
       }
-      const username = req.body.username;
-      const password = req.body.password;
+      const { username, password } = req.body || {};
       if (!username || !password) {
         return res.status(400).json({ error: 'Username and password are required.' });
       }
@@ -837,7 +1000,9 @@ export function createApiApp(): Express {
       if (!db || db.mode !== 'admin') {
         return res.status(503).json({
           error:
-            'Username/password staff login requires server-side Firebase Admin SDK access. Please use "Sign In with Google Staff Account" below.',
+            initState.errorMessage ||
+            'Username/password staff login requires server-side Firebase Admin SDK access. Configure FIREBASE_SERVICE_ACCOUNT_JSON in Netlify or use "Sign In with Google Staff Account".',
+          code: initState.errorCode,
         });
       }
 
@@ -936,12 +1101,13 @@ export function createApiApp(): Express {
     } catch (err: any) {
       console.error('Teacher login error:', err);
       const formatted = formatServerFirestoreError(err, db, 'Internal teacher login error');
-      return res.status(formatted.status).json({ error: formatted.message });
+      return res.status(formatted.status).json({ error: formatted.message, code: formatted.code });
     }
   });
 
   // Validate and refresh active teacher credential session against Firestore
   app.get('/api/auth/teacher-session', async (req: Request, res: Response) => {
+    const { db, adminAuth, initState } = getServerDbAdapter();
     try {
       const authHeader = req.headers.authorization || '';
       const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
@@ -955,7 +1121,10 @@ export function createApiApp(): Express {
       }
 
       if (!db || db.mode !== 'admin') {
-        return res.status(503).json({ error: 'Server-side Firebase Admin SDK is not configured in this environment.' });
+        return res.status(503).json({
+          error: initState.errorMessage || 'Server-side Firebase Admin SDK is not configured in this environment.',
+          code: initState.errorCode,
+        });
       }
 
       const teacherSnap = await db.getDoc('teachers', payload.sub);
@@ -1001,20 +1170,22 @@ export function createApiApp(): Express {
       });
     } catch (err: any) {
       const formatted = formatServerFirestoreError(err, db, 'Teacher session validation error');
-      return res.status(formatted.status).json({ error: formatted.message });
+      return res.status(formatted.status).json({ error: formatted.message, code: formatted.code });
     }
   });
 
   // Learner Authentication: Digital ID (Username) + Password Login
   app.post('/api/auth/learner-login', async (req: Request, res: Response) => {
+    const { db, adminAuth, initState } = getServerDbAdapter();
     try {
       if (IS_PRODUCTION && !SESSION_SECRET_CONFIGURED) {
         return res.status(503).json({
           error: 'Server SESSION_SECRET is not configured. Set a 32+ character SESSION_SECRET in Netlify Environment Variables.',
+          code: 'MISSING_SESSION_SECRET',
         });
       }
-      const username = req.body.username || req.body.digitalId;
-      const password = req.body.password;
+      const { username: bodyUsername, digitalId: bodyDigitalId, password } = req.body || {};
+      const username = bodyUsername || bodyDigitalId;
       if (!username || !password) {
         return res.status(400).json({ error: 'Digital ID / Username and password are required' });
       }
@@ -1022,7 +1193,9 @@ export function createApiApp(): Express {
       if (!db || db.mode !== 'admin') {
         return res.status(503).json({
           error:
-            'Learner Digital ID login requires server-side Firebase Admin SDK access, which is not active on this preview server. Staff can sign in using "Sign In with Google Staff Account".',
+            initState.errorMessage ||
+            'Learner Digital ID login requires server-side Firebase Admin SDK access. Configure FIREBASE_SERVICE_ACCOUNT_JSON in Netlify or sign in using "Sign In with Google Staff Account".',
+          code: initState.errorCode,
         });
       }
 
@@ -1132,6 +1305,7 @@ export function createApiApp(): Express {
 
   // Learner Password Change (Mandatory on first login, or voluntary with currentPassword)
   app.post('/api/auth/learner-change-password', requireLearnerAuth, async (req: AuthenticatedLearnerRequest, res: Response) => {
+    const { db } = getServerDbAdapter();
     try {
       if (!db) {
         return res.status(503).json({ error: 'Database service unavailable' });
@@ -1213,6 +1387,7 @@ export function createApiApp(): Express {
 
   // Scoped Learner Endpoints (Strictly enforces assigned cohorts)
   app.get('/api/learner/cohorts', requireLearnerAuth, async (req: AuthenticatedLearnerRequest, res: Response) => {
+    const { db } = getServerDbAdapter();
     try {
       if (!db) {
         return res.status(503).json({ error: 'Database service unavailable' });
@@ -1233,6 +1408,7 @@ export function createApiApp(): Express {
   });
 
   app.get('/api/learner/registers', requireLearnerAuth, async (req: AuthenticatedLearnerRequest, res: Response) => {
+    const { db } = getServerDbAdapter();
     try {
       if (!db) {
         return res.status(503).json({ error: 'Database service unavailable' });
@@ -1275,6 +1451,7 @@ export function createApiApp(): Express {
   });
 
   app.get('/api/learner/feedback', requireLearnerAuth, async (req: AuthenticatedLearnerRequest, res: Response) => {
+    const { db } = getServerDbAdapter();
     try {
       if (!db) {
         return res.status(503).json({ error: 'Database service unavailable' });
@@ -1291,6 +1468,7 @@ export function createApiApp(): Express {
   });
 
   app.get('/api/learner/timetable', requireLearnerAuth, async (req: AuthenticatedLearnerRequest, res: Response) => {
+    const { db } = getServerDbAdapter();
     try {
       if (!db) {
         return res.status(503).json({ error: 'Database service unavailable' });
@@ -1327,6 +1505,7 @@ export function createApiApp(): Express {
   });
 
   app.get('/api/learner/settings', requireLearnerAuth, async (_req: AuthenticatedLearnerRequest, res: Response) => {
+    const { db } = getServerDbAdapter();
     const defaultSettings = {
       id: 'school_config',
       schoolName: 'Sangurur Comprehensive School',
@@ -1351,6 +1530,7 @@ export function createApiApp(): Express {
 
   // Create Single Learner (Authenticated Teacher Only)
   app.post('/api/learners/create', requireTeacherAuth, async (req: AuthenticatedTeacherRequest, res: Response) => {
+    const { db } = getServerDbAdapter();
     try {
       const authTeacher = req.authTeacher!;
       const {
@@ -1473,6 +1653,7 @@ export function createApiApp(): Express {
 
   // Bulk Import Learners (Authenticated Teacher Only)
   app.post('/api/learners/bulk-import', requireTeacherAuth, async (req: AuthenticatedTeacherRequest, res: Response) => {
+    const { db } = getServerDbAdapter();
     try {
       const authTeacher = req.authTeacher!;
       const { cohortId, learners } = req.body;
@@ -1598,6 +1779,7 @@ export function createApiApp(): Express {
 
   // Teacher Resets Learner Password to Default Password (Authenticated Teacher Only)
   app.post('/api/learners/reset-password', requireTeacherAuth, async (req: AuthenticatedTeacherRequest, res: Response) => {
+    const { db } = getServerDbAdapter();
     try {
       if (!db) {
         return res.status(503).json({ error: 'Database service unavailable' });
@@ -1673,6 +1855,7 @@ export function createApiApp(): Express {
 
   // Daily Register Submission (Strictly authenticated learner)
   app.post('/api/attendance/submit', requireLearnerAuth, async (req: AuthenticatedLearnerRequest, res: Response) => {
+    const { db } = getServerDbAdapter();
     try {
       if (!db) {
         return res.status(503).json({ error: 'Database service unavailable' });
@@ -1899,6 +2082,7 @@ export function createApiApp(): Express {
 
   // Bulk Upload Historical / Previous Dates Attendance Register (Authenticated Teacher Only)
   app.post('/api/attendance/bulk-upload', requireTeacherAuth, async (req: AuthenticatedTeacherRequest, res: Response) => {
+    const { db } = getServerDbAdapter();
     try {
       const authTeacher = req.authTeacher!;
       const {
