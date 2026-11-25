@@ -122,7 +122,11 @@ service cloud.firestore {
              data.learnerId is string && data.learnerId.size() > 0 && data.learnerId.size() <= 64 &&
              data.username is string && data.username.size() > 0 && data.username.size() <= 64 &&
              (!data.keys().hasAny(['schoolName']) || data.schoolName == null || (data.schoolName is string && data.schoolName.size() <= 128)) &&
-             (!data.keys().hasAny(['grade']) || data.grade == null || (data.grade is string && data.grade.size() <= 64));
+             (!data.keys().hasAny(['grade']) || data.grade == null || (data.grade is string && data.grade.size() <= 64)) &&
+             (!data.keys().hasAny(['levelId']) || data.levelId == null || (data.levelId is string && data.levelId.size() <= 128)) &&
+             (!data.keys().hasAny(['levelName']) || data.levelName == null || (data.levelName is string && data.levelName.size() <= 128)) &&
+             (!data.keys().hasAny(['classId']) || data.classId == null || (data.classId is string && data.classId.size() <= 128)) &&
+             (!data.keys().hasAny(['className']) || data.className == null || (data.className is string && data.className.size() <= 128));
     }
 
     match /learners/{learnerId} {
@@ -136,6 +140,12 @@ service cloud.firestore {
                          isAdmin() ||
                          (isTeacherOrAdmin() && incoming().diff(existing()).affectedKeys().hasOnly([
                            'assignedCohortIds',
+                           'assignedClassIds',
+                           'levelId',
+                           'levelName',
+                           'classId',
+                           'className',
+                           'grade',
                            'passwordHash',
                            'salt',
                            'mustChangePassword',
@@ -190,7 +200,12 @@ service cloud.firestore {
                          isStaffWideAccess() ||
                          (isTeacherOrAdmin() && existing().teacherId == request.auth.uid && incoming().teacherId == existing().teacherId)
                        );
-      allow delete: if isValidId(cohortId) && isAdmin();
+      allow delete: if isValidId(cohortId) &&
+                       isSignedIn() &&
+                       (
+                         isStaffWideAccess() ||
+                         (isTeacherOrAdmin() && existing().teacherId == request.auth.uid)
+                       );
     }
 
     // Cohort Members Collection: Enforces cohort ownership + learner self-read
@@ -343,7 +358,7 @@ service cloud.firestore {
       allow delete: if isValidId(settingId) && isAdmin();
     }
 
-    // Weekly Timetables Collection: Enforces teacher cohort ownership
+    // Weekly Timetables Collection: Enforces teacher cohort ownership + enrolled learner read
     function isValidWeeklyTimetable(data) {
       return data.keys().hasAll(['cohortId', 'programmeTerm', 'weekNumber', 'weekLabel', 'startDate', 'endDate', 'topics']) &&
              data.cohortId is string && data.cohortId.size() > 0 && data.cohortId.size() <= 128 &&
@@ -352,19 +367,83 @@ service cloud.firestore {
              data.weekLabel is string && data.weekLabel.size() > 0 && data.weekLabel.size() <= 128 &&
              data.startDate is string && data.startDate.size() == 10 &&
              data.endDate is string && data.endDate.size() == 10 &&
-             data.topics is list && data.topics.size() <= 50;
+             data.topics is list && data.topics.size() <= 50 &&
+             (!data.keys().hasAny(['levelId']) || data.levelId == null || (data.levelId is string && data.levelId.size() <= 128)) &&
+             (!data.keys().hasAny(['levelName']) || data.levelName == null || (data.levelName is string && data.levelName.size() <= 128)) &&
+             (!data.keys().hasAny(['classId']) || data.classId == null || (data.classId is string && data.classId.size() <= 128)) &&
+             (!data.keys().hasAny(['className']) || data.className == null || (data.className is string && data.className.size() <= 128));
     }
 
     match /weeklyTimetables/{entryId} {
       allow get, list: if isSignedIn() && (
         isStaffWideAccess() ||
-        ownsCohort(resource.data.cohortId)
+        ownsCohort(resource.data.cohortId) ||
+        (isLearnerUser() && (
+          resource.data.cohortId in get(/databases/$(database)/documents/learners/$(request.auth.uid)).data.assignedCohortIds
+        ))
       );
       allow create, update: if isValidId(entryId) &&
                                isSignedIn() &&
                                isValidWeeklyTimetable(incoming()) &&
                                ownsCohort(incoming().cohortId);
       allow delete: if isValidId(entryId) &&
+                       isSignedIn() &&
+                       ownsCohort(existing().cohortId);
+    }
+
+    // Cohort Levels Collection (e.g. August Holiday Bootcamp Training inside a Cohort)
+    function isValidCohortLevel(data) {
+      return data.keys().hasAll(['cohortId', 'name', 'status']) &&
+             data.cohortId is string && data.cohortId.size() > 0 && data.cohortId.size() <= 128 &&
+             data.name is string && data.name.size() > 0 && data.name.size() <= 128 &&
+             data.status in ['active', 'archived'] &&
+             (!data.keys().hasAny(['code']) || data.code == null || (data.code is string && data.code.size() <= 64)) &&
+             (!data.keys().hasAny(['description']) || data.description == null || (data.description is string && data.description.size() <= 512));
+    }
+
+    match /cohortLevels/{levelId} {
+      allow get, list: if isSignedIn() && (
+        isStaffWideAccess() ||
+        ownsCohort(resource.data.cohortId) ||
+        (isLearnerUser() && (
+          resource.data.cohortId in get(/databases/$(database)/documents/learners/$(request.auth.uid)).data.assignedCohortIds
+        ))
+      );
+      allow create, update: if isValidId(levelId) &&
+                               isSignedIn() &&
+                               isValidCohortLevel(incoming()) &&
+                               ownsCohort(incoming().cohortId);
+      allow delete: if isValidId(levelId) &&
+                       isSignedIn() &&
+                       ownsCohort(existing().cohortId);
+    }
+
+    // Cohort Classes Collection (e.g. Lower Primary, Upper Primary, Junior School, Senior School)
+    function isValidCohortClass(data) {
+      return data.keys().hasAll(['cohortId', 'levelId', 'name', 'code', 'coursesOffered', 'status']) &&
+             data.cohortId is string && data.cohortId.size() > 0 && data.cohortId.size() <= 128 &&
+             data.levelId is string && data.levelId.size() > 0 && data.levelId.size() <= 128 &&
+             data.name is string && data.name.size() > 0 && data.name.size() <= 128 &&
+             data.code is string && data.code.size() > 0 && data.code.size() <= 64 &&
+             data.coursesOffered is list && data.coursesOffered.size() <= 50 &&
+             data.status in ['active', 'archived'] &&
+             (!data.keys().hasAny(['gradeBand']) || data.gradeBand == null || (data.gradeBand is string && data.gradeBand.size() <= 64)) &&
+             (!data.keys().hasAny(['ageBracket']) || data.ageBracket == null || (data.ageBracket is string && data.ageBracket.size() <= 64));
+    }
+
+    match /cohortClasses/{classId} {
+      allow get, list: if isSignedIn() && (
+        isStaffWideAccess() ||
+        ownsCohort(resource.data.cohortId) ||
+        (isLearnerUser() && (
+          resource.data.cohortId in get(/databases/$(database)/documents/learners/$(request.auth.uid)).data.assignedCohortIds
+        ))
+      );
+      allow create, update: if isValidId(classId) &&
+                               isSignedIn() &&
+                               isValidCohortClass(incoming()) &&
+                               ownsCohort(incoming().cohortId);
+      allow delete: if isValidId(classId) &&
                        isSignedIn() &&
                        ownsCohort(existing().cohortId);
     }

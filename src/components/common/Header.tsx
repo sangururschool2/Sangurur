@@ -60,11 +60,11 @@ export const Header: React.FC<HeaderProps> = ({ showMenuButton = false, onToggle
                 <span className="font-extrabold text-white text-sm sm:text-lg tracking-tight truncate">
                   SANGURUR COMPREHENSIVE SCHOOL
                 </span>
-                <span className="hidden sm:inline-block px-2 py-0.5 text-[11px] font-bold rounded-full bg-white/15 text-white border border-white/30 shrink-0">
+                <span className="hidden sm:inline-block px-2 py-0.5 text-xs font-bold rounded-full bg-white/15 text-white border border-white/30 shrink-0">
                   SDLR
                 </span>
               </div>
-              <div className="flex items-center space-x-2 text-xs">
+              <div className="flex items-center space-x-2 text-xs sm:text-sm">
                 <span className="font-semibold text-emerald-100 uppercase tracking-wider truncate">
                   Motto: Think, Code, Change the World
                 </span>
@@ -77,8 +77,8 @@ export const Header: React.FC<HeaderProps> = ({ showMenuButton = false, onToggle
           {/* Time & User Profile / Logout */}
           <div className="flex items-center space-x-4">
             {/* Nairobi local timezone badge */}
-            <div className="hidden lg:flex items-center space-x-1.5 text-xs font-medium text-emerald-50 bg-black/20 px-3 py-1.5 rounded-lg border border-white/20">
-              <Clock className="w-3.5 h-3.5 text-emerald-200" />
+            <div className="hidden lg:flex items-center space-x-1.5 text-sm font-medium text-emerald-50 bg-black/20 px-3 py-1.5 rounded-lg border border-white/20">
+              <Clock className="w-4 h-4 text-emerald-200" />
               <span>{nairobiTime || 'Nairobi Time (EAT)'}</span>
             </div>
 
@@ -122,9 +122,9 @@ export const Header: React.FC<HeaderProps> = ({ showMenuButton = false, onToggle
               <button
                 onClick={logout}
                 title="Sign out of SDLR"
-                className="flex items-center space-x-1 px-3 py-1.5 text-xs font-semibold text-white bg-white/10 hover:bg-rose-600 hover:border-rose-500 rounded-lg transition-colors border border-white/25"
+                className="flex items-center space-x-1.5 px-3 py-1.5 text-sm font-semibold text-white bg-white/10 hover:bg-rose-600 hover:border-rose-500 rounded-lg transition-colors border border-white/25"
               >
-                <LogOut className="w-3.5 h-3.5" />
+                <LogOut className="w-4 h-4" />
                 <span className="hidden sm:inline">Sign Out</span>
               </button>
             </div>

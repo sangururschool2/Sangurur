@@ -29,8 +29,43 @@ import {
   Teacher,
   WeeklyTimetableEntry,
   TimetableTopicSlot,
+  CohortLevel,
+  CohortClass,
+  CourseOffered,
 } from '../types';
-import { PREDEFINED_CURRICULA } from './curriculumTemplates';
+import {
+  PREDEFINED_CURRICULA,
+  UPPER_JUNIOR_SENIOR_CURRICULUM_ID,
+} from './curriculumTemplates';
+
+export { UPPER_JUNIOR_SENIOR_CURRICULUM_ID };
+
+/**
+ * Recursively removes keys with `undefined` values before passing objects to
+ * Firestore `setDoc` / `updateDoc`, while preserving `null`, primitives, Dates,
+ * and Firestore FieldValue sentinels.
+ */
+function stripUndefinedDeep<T>(value: T): T {
+  if (Array.isArray(value)) {
+    return value
+      .filter((item) => item !== undefined)
+      .map((item) => stripUndefinedDeep(item)) as unknown as T;
+  }
+  if (value !== null && typeof value === 'object') {
+    const proto = Object.getPrototypeOf(value);
+    if (proto !== Object.prototype && proto !== null) {
+      return value;
+    }
+    const result: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      if (v !== undefined) {
+        result[k] = stripUndefinedDeep(v);
+      }
+    }
+    return result as T;
+  }
+  return value;
+}
 
 // ----------------- TEACHERS -----------------
 export async function getTeachers(): Promise<Teacher[]> {
@@ -91,12 +126,12 @@ export async function getCohorts(
 
 export async function createCohort(cohortData: Omit<Cohort, 'id' | 'createdAt'>): Promise<Cohort> {
   const docId = `coh_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
-  const newCohort: Cohort = {
+  const newCohort = stripUndefinedDeep<Cohort>({
     ...cohortData,
     id: docId,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
-  };
+  });
 
   try {
     await setDoc(doc(db, 'cohorts', docId), newCohort);
@@ -110,12 +145,100 @@ export async function createCohort(cohortData: Omit<Cohort, 'id' | 'createdAt'>)
 export async function updateCohort(cohortId: string, updates: Partial<Cohort>): Promise<void> {
   try {
     const ref = doc(db, 'cohorts', cohortId);
-    await updateDoc(ref, {
-      ...updates,
-      updatedAt: new Date().toISOString(),
-    });
+    await updateDoc(
+      ref,
+      stripUndefinedDeep({
+        ...updates,
+        updatedAt: new Date().toISOString(),
+      })
+    );
   } catch (error) {
     handleFirestoreError(error, OperationType.UPDATE, `cohorts/${cohortId}`);
+    throw error;
+  }
+}
+
+export async function deleteCohort(
+  cohortId: string,
+  actor?: { uid: string; fullName: string; role: string }
+): Promise<void> {
+  try {
+    const cohortSnap = await getDoc(doc(db, 'cohorts', cohortId));
+    const cohortName = cohortSnap.exists() ? String(cohortSnap.data().name || cohortId) : cohortId;
+
+    // 1. Delete dependent child documents BEFORE deleting the parent cohort document
+    // so Firestore security rules evaluating ownsCohort(cohortId) succeed for every child.
+    const [classesSnap, levelsSnap, timetablesSnap, membersSnap, learnersSnap] = await Promise.all([
+      getDocs(query(collection(db, 'cohortClasses'), where('cohortId', '==', cohortId))),
+      getDocs(query(collection(db, 'cohortLevels'), where('cohortId', '==', cohortId))),
+      getDocs(query(collection(db, 'weeklyTimetables'), where('cohortId', '==', cohortId))),
+      getDocs(query(collection(db, 'cohortMembers'), where('cohortId', '==', cohortId))),
+      getDocs(query(collection(db, 'learners'), where('assignedCohortIds', 'array-contains', cohortId))),
+    ]);
+
+    const deletedClassIds = new Set(classesSnap.docs.map((d) => d.id));
+    const deletedLevelIds = new Set(levelsSnap.docs.map((d) => d.id));
+
+    await Promise.all([
+      ...classesSnap.docs.map((d) => deleteDoc(d.ref)),
+      ...levelsSnap.docs.map((d) => deleteDoc(d.ref)),
+      ...timetablesSnap.docs.map((d) => deleteDoc(d.ref)),
+      ...membersSnap.docs.map((d) => deleteDoc(d.ref)),
+    ]);
+
+    // 2. Unassign cohort, level, and class references from affected learner profiles
+    const learnerDocsById = new Map<string, (typeof learnersSnap.docs)[number]>();
+    learnersSnap.docs.forEach((d) => learnerDocsById.set(d.id, d));
+
+    const extraMemberLearnerIds = membersSnap.docs
+      .map((d) => String(d.data().learnerId || ''))
+      .filter((lid) => lid && !learnerDocsById.has(lid));
+
+    for (const lid of extraMemberLearnerIds) {
+      const lSnap = await getDoc(doc(db, 'learners', lid));
+      if (lSnap.exists()) {
+        learnerDocsById.set(lSnap.id, lSnap as (typeof learnersSnap.docs)[number]);
+      }
+    }
+
+    const now = new Date().toISOString();
+    await Promise.all(
+      Array.from(learnerDocsById.values()).map((lDoc) => {
+        const data = lDoc.data();
+        const nextCohortIds = ((data.assignedCohortIds || []) as string[]).filter(
+          (cid) => cid !== cohortId
+        );
+        const nextClassIds = ((data.assignedClassIds || []) as string[]).filter(
+          (clsId) => !deletedClassIds.has(clsId)
+        );
+        const clearsCurrentClass = Boolean(data.classId && deletedClassIds.has(data.classId));
+        const clearsCurrentLevel = Boolean(data.levelId && deletedLevelIds.has(data.levelId));
+
+        return updateDoc(lDoc.ref, {
+          assignedCohortIds: nextCohortIds,
+          assignedClassIds: nextClassIds,
+          ...(clearsCurrentClass ? { classId: null, className: null } : {}),
+          ...(clearsCurrentLevel ? { levelId: null, levelName: null } : {}),
+          updatedAt: now,
+        });
+      })
+    );
+
+    // 3. Delete the parent cohort document
+    await deleteDoc(doc(db, 'cohorts', cohortId));
+
+    // 4. Record audit trail
+    await logAuditEvent({
+      actorId: actor?.uid || auth.currentUser?.uid || 'teacher_staff',
+      actorName: actor?.fullName || 'School Staff',
+      actorRole: actor?.role || 'teacher',
+      action: 'DELETE_COHORT',
+      targetEntity: 'cohorts',
+      targetId: cohortId,
+      details: `Deleted cohort "${cohortName}" along with ${levelsSnap.size} level(s), ${classesSnap.size} class(es), and ${timetablesSnap.size} weekly schedule(s).`,
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, `cohorts/${cohortId}`);
     throw error;
   }
 }
@@ -167,26 +290,240 @@ export async function getLearnersByCohort(cohortId: string): Promise<Learner[]> 
   }
 }
 
-export async function assignLearnerToCohort(cohortId: string, learner: Learner): Promise<void> {
+// ----------------- COHORT LEVELS & CLASSES -----------------
+export function buildDefaultCoursesFromCurriculum(curr?: Curriculum | null): CourseOffered[] {
+  if (!curr || !Array.isArray(curr.learningAreas)) return [];
+  return curr.learningAreas.map((la, idx) => ({
+    id: `course_${la.id || idx + 1}`,
+    title: la.title,
+    code: `CRS-${String(idx + 1).padStart(2, '0')}`,
+    category: curr.category || 'Computing',
+    description: la.description || `${curr.title} — ${la.title}`,
+    hoursPerWeek: '4 hrs/week',
+    curriculumId: curr.id,
+  }));
+}
+
+export async function getCohortLevels(filters?: {
+  cohortId?: string;
+  cohortIds?: string[];
+}): Promise<CohortLevel[]> {
+  try {
+    const colRef = collection(db, 'cohortLevels');
+    if (filters?.cohortIds && !filters.cohortId) {
+      if (filters.cohortIds.length === 0) return [];
+      const perCohort = await Promise.all(
+        filters.cohortIds.map(async (cid) => {
+          const snap = await getDocs(query(colRef, where('cohortId', '==', cid)));
+          return snap.docs.map((d) => ({ ...d.data(), id: d.id } as CohortLevel));
+        })
+      );
+      return perCohort
+        .flat()
+        .sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || ''));
+    }
+    const q = filters?.cohortId ? query(colRef, where('cohortId', '==', filters.cohortId)) : colRef;
+    const snap = await getDocs(q);
+    return snap.docs
+      .map((d) => ({ ...d.data(), id: d.id } as CohortLevel))
+      .sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || ''));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.GET, 'cohortLevels');
+    return [];
+  }
+}
+
+export async function createCohortLevel(
+  levelData: Omit<CohortLevel, 'id' | 'createdAt'>
+): Promise<CohortLevel> {
+  const docId = `lvl_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+  const now = new Date().toISOString();
+  const newLevel = stripUndefinedDeep<CohortLevel>({
+    ...levelData,
+    name: levelData.name.trim().slice(0, 128),
+    ...(levelData.code?.trim() ? { code: levelData.code.trim().slice(0, 64) } : {}),
+    ...(levelData.description?.trim() ? { description: levelData.description.trim().slice(0, 512) } : {}),
+    id: docId,
+    createdAt: now,
+    updatedAt: now,
+  });
+  try {
+    await setDoc(doc(db, 'cohortLevels', docId), newLevel);
+    return newLevel;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.CREATE, `cohortLevels/${docId}`);
+    throw error;
+  }
+}
+
+export async function updateCohortLevel(
+  levelId: string,
+  updates: Partial<CohortLevel>
+): Promise<void> {
+  try {
+    await updateDoc(
+      doc(db, 'cohortLevels', levelId),
+      stripUndefinedDeep({
+        ...updates,
+        updatedAt: new Date().toISOString(),
+      })
+    );
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, `cohortLevels/${levelId}`);
+    throw error;
+  }
+}
+
+export async function deleteCohortLevel(levelId: string): Promise<void> {
+  try {
+    await deleteDoc(doc(db, 'cohortLevels', levelId));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, `cohortLevels/${levelId}`);
+    throw error;
+  }
+}
+
+export async function getCohortClasses(filters?: {
+  cohortId?: string;
+  cohortIds?: string[];
+  levelId?: string;
+}): Promise<CohortClass[]> {
+  try {
+    const colRef = collection(db, 'cohortClasses');
+    if (filters?.cohortIds && !filters.cohortId) {
+      if (filters.cohortIds.length === 0) return [];
+      const perCohort = await Promise.all(
+        filters.cohortIds.map(async (cid) => {
+          const snap = await getDocs(query(colRef, where('cohortId', '==', cid)));
+          return snap.docs.map((d) => ({ ...d.data(), id: d.id } as CohortClass));
+        })
+      );
+      return perCohort
+        .flat()
+        .filter((c) => !filters.levelId || c.levelId === filters.levelId)
+        .sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || ''));
+    }
+    const q = filters?.cohortId
+      ? query(colRef, where('cohortId', '==', filters.cohortId))
+      : filters?.levelId
+      ? query(colRef, where('levelId', '==', filters.levelId))
+      : colRef;
+    const snap = await getDocs(q);
+    return snap.docs
+      .map((d) => ({ ...d.data(), id: d.id } as CohortClass))
+      .filter((c) => !filters?.levelId || c.levelId === filters.levelId)
+      .sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || ''));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.GET, 'cohortClasses');
+    return [];
+  }
+}
+
+export async function createCohortClass(
+  classData: Omit<CohortClass, 'id' | 'createdAt'>
+): Promise<CohortClass> {
+  const docId = `cls_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+  const now = new Date().toISOString();
+  const newClass = stripUndefinedDeep<CohortClass>({
+    ...classData,
+    name: classData.name.trim().slice(0, 128),
+    code: classData.code.trim().toUpperCase().slice(0, 64),
+    ...(classData.description?.trim() ? { description: classData.description.trim().slice(0, 512) } : {}),
+    coursesOffered: Array.isArray(classData.coursesOffered)
+      ? classData.coursesOffered.slice(0, 50)
+      : [],
+    id: docId,
+    createdAt: now,
+    updatedAt: now,
+  });
+  try {
+    await setDoc(doc(db, 'cohortClasses', docId), newClass);
+    return newClass;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.CREATE, `cohortClasses/${docId}`);
+    throw error;
+  }
+}
+
+export async function updateCohortClass(
+  classId: string,
+  updates: Partial<CohortClass>
+): Promise<void> {
+  try {
+    await updateDoc(
+      doc(db, 'cohortClasses', classId),
+      stripUndefinedDeep({
+        ...updates,
+        ...(updates.coursesOffered ? { coursesOffered: updates.coursesOffered.slice(0, 50) } : {}),
+        updatedAt: new Date().toISOString(),
+      })
+    );
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, `cohortClasses/${classId}`);
+    throw error;
+  }
+}
+
+export async function deleteCohortClass(classId: string): Promise<void> {
+  try {
+    await deleteDoc(doc(db, 'cohortClasses', classId));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, `cohortClasses/${classId}`);
+    throw error;
+  }
+}
+
+export async function assignLearnerToCohort(
+  cohortId: string,
+  learner: Learner,
+  classContext?: {
+    levelId?: string;
+    levelName?: string;
+    classId?: string;
+    className?: string;
+    gradeBand?: string;
+  }
+): Promise<void> {
   try {
     const memberId = `mem_${cohortId}_${learner.id}`;
-    await setDoc(doc(db, 'cohortMembers', memberId), {
-      id: memberId,
-      cohortId,
-      learnerId: learner.id,
-      learnerName: learner.fullName,
-      learnerCode: learner.learnerId,
-      joinedAt: new Date().toISOString(),
-      status: 'active',
-    });
+    await setDoc(
+      doc(db, 'cohortMembers', memberId),
+      stripUndefinedDeep({
+        id: memberId,
+        cohortId,
+        learnerId: learner.id,
+        learnerName: learner.fullName,
+        learnerCode: learner.learnerId,
+        ...(classContext?.levelId ? { levelId: classContext.levelId, levelName: classContext.levelName } : {}),
+        ...(classContext?.classId ? { classId: classContext.classId, className: classContext.className } : {}),
+        joinedAt: new Date().toISOString(),
+        status: 'active',
+      })
+    );
 
     const currentCohorts = learner.assignedCohortIds || [];
-    if (!currentCohorts.includes(cohortId)) {
-      await updateDoc(doc(db, 'learners', learner.id), {
-        assignedCohortIds: [...currentCohorts, cohortId],
-        updatedAt: new Date().toISOString(),
-      });
+    const nextCohorts = currentCohorts.includes(cohortId)
+      ? currentCohorts
+      : [...currentCohorts, cohortId];
+    const currentClasses = learner.assignedClassIds || [];
+    const nextClasses =
+      classContext?.classId && !currentClasses.includes(classContext.classId)
+        ? [...currentClasses, classContext.classId]
+        : currentClasses;
+
+    const learnerUpdates: Record<string, unknown> = {
+      assignedCohortIds: nextCohorts,
+      updatedAt: new Date().toISOString(),
+    };
+    if (classContext?.classId) {
+      learnerUpdates.assignedClassIds = nextClasses;
+      learnerUpdates.classId = classContext.classId;
+      learnerUpdates.className = classContext.className || null;
+      learnerUpdates.levelId = classContext.levelId || null;
+      learnerUpdates.levelName = classContext.levelName || null;
     }
+
+    await updateDoc(doc(db, 'learners', learner.id), stripUndefinedDeep(learnerUpdates));
   } catch (error) {
     handleFirestoreError(error, OperationType.CREATE, 'cohortMembers');
     throw error;
@@ -221,7 +558,29 @@ export async function getCurricula(): Promise<Curriculum[]> {
       await seedCurriculaIfEmpty();
       return PREDEFINED_CURRICULA;
     }
-    return snap.docs.map((d) => ({ ...d.data(), id: d.id } as Curriculum));
+    const existingList = snap.docs.map((d) => ({ ...d.data(), id: d.id } as Curriculum));
+    const existingIds = new Set(existingList.map((c) => c.id));
+    const missingPredefined = PREDEFINED_CURRICULA.filter((c) => !existingIds.has(c.id));
+
+    if (missingPredefined.length > 0) {
+      if (auth.currentUser) {
+        for (const curr of missingPredefined) {
+          try {
+            await setDoc(doc(db, 'curricula', curr.id), stripUndefinedDeep(curr));
+          } catch {
+            // Learners or restricted accounts may not have write access; keep merged in-memory.
+          }
+        }
+      }
+      return [...missingPredefined, ...existingList];
+    }
+
+    // Ensure the built-in Upper/Junior/Senior template appears early for quick selection
+    return existingList.sort((a, b) => {
+      if (a.id === UPPER_JUNIOR_SENIOR_CURRICULUM_ID) return -1;
+      if (b.id === UPPER_JUNIOR_SENIOR_CURRICULUM_ID) return 1;
+      return 0;
+    });
   } catch (error) {
     console.warn('Could not read from Firestore curricula collection, falling back to predefined templates:', error);
     return PREDEFINED_CURRICULA;
@@ -231,7 +590,7 @@ export async function getCurricula(): Promise<Curriculum[]> {
 export async function seedCurriculaIfEmpty(): Promise<void> {
   try {
     for (const curr of PREDEFINED_CURRICULA) {
-      await setDoc(doc(db, 'curricula', curr.id), curr);
+      await setDoc(doc(db, 'curricula', curr.id), stripUndefinedDeep(curr));
     }
   } catch (err) {
     console.warn('Seeding notice:', err);
@@ -240,12 +599,12 @@ export async function seedCurriculaIfEmpty(): Promise<void> {
 
 export async function createCurriculum(curr: Omit<Curriculum, 'id' | 'createdAt'>): Promise<Curriculum> {
   const docId = `curr_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
-  const newCurr: Curriculum = {
+  const newCurr = stripUndefinedDeep<Curriculum>({
     ...curr,
     id: docId,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
-  };
+  });
 
   try {
     await setDoc(doc(db, 'curricula', docId), newCurr);
@@ -263,11 +622,14 @@ export async function updateCurriculum(id: string, updates: Partial<Curriculum>)
     const currentVersion = snap.exists() ? Number(snap.data().version || 1) : 1;
     const nextVersion = currentVersion + 1;
 
-    await updateDoc(ref, {
-      ...updates,
-      version: nextVersion,
-      updatedAt: new Date().toISOString(),
-    });
+    await updateDoc(
+      ref,
+      stripUndefinedDeep({
+        ...updates,
+        version: nextVersion,
+        updatedAt: new Date().toISOString(),
+      })
+    );
     return nextVersion;
   } catch (error) {
     handleFirestoreError(error, OperationType.UPDATE, `curricula/${id}`);
@@ -422,7 +784,7 @@ export async function logTeacherAttendanceEntry(entry: {
       );
     }
 
-    const register: DailyRegister = {
+    const register = stripUndefinedDeep<DailyRegister>({
       id: docId,
       cohortId: entry.cohortId,
       cohortCode: entry.cohortCode,
@@ -437,7 +799,7 @@ export async function logTeacherAttendanceEntry(entry: {
       reviewedBy: entry.teacherId,
       reviewedAt: new Date().toISOString(),
       correctionHistory: [],
-    };
+    });
 
     await setDoc(docRef, register);
 
@@ -539,12 +901,12 @@ export async function sendTeacherFeedback(
   feedback: Omit<TeacherFeedback, 'id' | 'createdAt' | 'isRead'>
 ): Promise<void> {
   const docId = `fb_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
-  const item: TeacherFeedback = {
+  const item = stripUndefinedDeep<TeacherFeedback>({
     ...feedback,
     id: docId,
     isRead: false,
     createdAt: new Date().toISOString(),
-  };
+  });
 
   try {
     await setDoc(doc(db, 'teacherFeedback', docId), item);
@@ -568,11 +930,11 @@ export async function getFeedbackForLearner(learnerDocId: string): Promise<Teach
 // ----------------- AUDIT LOGS -----------------
 export async function logAuditEvent(log: Omit<AuditLog, 'id' | 'timestamp'>): Promise<void> {
   const docId = `log_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
-  const item: AuditLog = {
+  const item = stripUndefinedDeep<AuditLog>({
     ...log,
     id: docId,
     timestamp: new Date().toISOString(),
-  };
+  });
 
   try {
     await setDoc(doc(db, 'auditLogs', docId), item);
@@ -628,7 +990,7 @@ export async function updateSchoolSettings(
   actor?: { uid: string; fullName: string; role: string }
 ): Promise<void> {
   try {
-    await updateDoc(doc(db, 'schoolSettings', 'school_config'), updates);
+    await updateDoc(doc(db, 'schoolSettings', 'school_config'), stripUndefinedDeep(updates));
     await logAuditEvent({
       actorId: actor?.uid || 'teacher_staff',
       actorName: actor?.fullName || 'School Administrator',
@@ -654,12 +1016,18 @@ export function getNairobiTodayYmd(): string {
   }).format(new Date());
 }
 
-export async function getWeeklyTimetable(cohortId?: string): Promise<WeeklyTimetableEntry[]> {
+export async function getWeeklyTimetable(
+  cohortId?: string,
+  classId?: string
+): Promise<WeeklyTimetableEntry[]> {
   try {
     const colRef = collection(db, 'weeklyTimetables');
     const q = cohortId ? query(colRef, where('cohortId', '==', cohortId)) : colRef;
     const snap = await getDocs(q);
-    const items = snap.docs.map((d) => ({ ...d.data(), id: d.id } as WeeklyTimetableEntry));
+    let items = snap.docs.map((d) => ({ ...d.data(), id: d.id } as WeeklyTimetableEntry));
+    if (classId) {
+      items = items.filter((item) => item.classId === classId);
+    }
     return items.sort((a, b) => {
       if (a.startDate !== b.startDate) return a.startDate.localeCompare(b.startDate);
       return (a.weekNumber || 0) - (b.weekNumber || 0);
@@ -678,13 +1046,14 @@ export async function createWeeklyTimetableEntry(
     .replace(/[^a-z0-9]+/g, '_')
     .replace(/^_|_$/g, '')
     .slice(0, 24);
-  const docId = `tt_${entry.cohortId}_${safeTerm}_w${entry.weekNumber}_${Date.now().toString(36)}`;
-  const newEntry: WeeklyTimetableEntry = {
+  const classPart = entry.classId ? `${entry.classId.slice(-8)}_` : '';
+  const docId = `tt_${entry.cohortId}_${classPart}${safeTerm}_w${entry.weekNumber}_${Date.now().toString(36)}`;
+  const newEntry = stripUndefinedDeep<WeeklyTimetableEntry>({
     ...entry,
     id: docId,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
-  };
+  });
 
   try {
     await setDoc(doc(db, 'weeklyTimetables', docId), newEntry);
@@ -701,10 +1070,13 @@ export async function updateWeeklyTimetableEntry(
 ): Promise<void> {
   try {
     const ref = doc(db, 'weeklyTimetables', entryId);
-    await updateDoc(ref, {
-      ...updates,
-      updatedAt: new Date().toISOString(),
-    });
+    await updateDoc(
+      ref,
+      stripUndefinedDeep({
+        ...updates,
+        updatedAt: new Date().toISOString(),
+      })
+    );
   } catch (error) {
     handleFirestoreError(error, OperationType.UPDATE, `weeklyTimetables/${entryId}`);
     throw error;
@@ -1056,39 +1428,484 @@ function buildNovDecHolidayWeekTemplates(facilitatorName: string): Array<{
   ];
 }
 
+export function isUpperJuniorSeniorTrack(
+  classContext?: Pick<CohortClass, 'name' | 'gradeBand' | 'code' | 'curriculumId'> | null,
+  cohort?: Pick<Cohort, 'learningLevel' | 'name' | 'curriculumId'> | null
+): boolean {
+  if (
+    classContext?.curriculumId === UPPER_JUNIOR_SENIOR_CURRICULUM_ID ||
+    (!classContext && cohort?.curriculumId === UPPER_JUNIOR_SENIOR_CURRICULUM_ID)
+  ) {
+    return true;
+  }
+
+  const rawText = classContext
+    ? `${classContext.name || ''} ${classContext.gradeBand || ''} ${classContext.code || ''}`
+    : `${cohort?.learningLevel || ''} ${cohort?.name || ''}`;
+  const text = rawText.toLowerCase();
+
+  const matchesTrack =
+    text.includes('upper primary') ||
+    text.includes('upper_primary') ||
+    text.includes('junior') ||
+    text.includes('senior') ||
+    text.includes('jss') ||
+    text.includes('secondary') ||
+    /\bgrade\s*(4|5|6|7|8|9|10|11|12)\b/.test(text) ||
+    /\bform\s*(1|2|3|4)\b/.test(text);
+
+  if (matchesTrack) return true;
+  if (text.includes('lower primary') || text.includes('play group') || text.includes('early years')) {
+    return false;
+  }
+  return false;
+}
+
+function buildUpperJuniorSeniorWeekTemplates(facilitatorName: string): Array<{
+  weekNumber: number;
+  weekLabel: string;
+  startDate: string;
+  endDate: string;
+  weeklyTheme: string;
+  topics: TimetableTopicSlot[];
+}> {
+  return [
+    {
+      weekNumber: 1,
+      weekLabel: 'Week 1: Office Production and MS Azure',
+      startDate: '2026-11-02',
+      endDate: '2026-11-06',
+      weeklyTheme: '2–6 November • Microsoft Office productivity (Word, Excel, PowerPoint) and MS Azure cloud basics',
+      topics: [
+        {
+          id: 'tt_ujs_w1_mon',
+          dayOfWeek: 'Monday',
+          timeSlot: '08:30 - 10:00',
+          topicTitle: 'Introduction to Microsoft Office',
+          learningArea: 'Office Production and MS Azure',
+          facilitator: facilitatorName,
+          practicalActivity: 'Identify Word, Excel and PowerPoint',
+          curriculumTopicId: 'top-ujs-w1-mon',
+        },
+        {
+          id: 'tt_ujs_w1_tue',
+          dayOfWeek: 'Tuesday',
+          timeSlot: '08:30 - 10:00',
+          topicTitle: 'Microsoft Word',
+          learningArea: 'Office Production and MS Azure',
+          facilitator: facilitatorName,
+          practicalActivity: 'Type and format a document',
+          curriculumTopicId: 'top-ujs-w1-tue',
+        },
+        {
+          id: 'tt_ujs_w1_wed',
+          dayOfWeek: 'Wednesday',
+          timeSlot: '08:30 - 10:00',
+          topicTitle: 'Microsoft Excel',
+          learningArea: 'Office Production and MS Azure',
+          facilitator: facilitatorName,
+          practicalActivity: 'Create a table and use formulas',
+          curriculumTopicId: 'top-ujs-w1-wed',
+        },
+        {
+          id: 'tt_ujs_w1_thu',
+          dayOfWeek: 'Thursday',
+          timeSlot: '08:30 - 10:00',
+          topicTitle: 'Microsoft PowerPoint',
+          learningArea: 'Office Production and MS Azure',
+          facilitator: facilitatorName,
+          practicalActivity: 'Create 5 presentation slides',
+          curriculumTopicId: 'top-ujs-w1-thu',
+        },
+        {
+          id: 'tt_ujs_w1_fri',
+          dayOfWeek: 'Friday',
+          timeSlot: '08:30 - 10:00',
+          topicTitle: 'Introduction to MS Azure',
+          learningArea: 'Office Production and MS Azure',
+          facilitator: facilitatorName,
+          practicalActivity: 'Explore cloud computing and Azure services',
+          curriculumTopicId: 'top-ujs-w1-fri',
+        },
+      ],
+    },
+    {
+      weekNumber: 2,
+      weekLabel: 'Week 2: Artificial Intelligence and C Programming',
+      startDate: '2026-11-09',
+      endDate: '2026-11-13',
+      weeklyTheme: '9–13 November • Introduction to AI applications and C programming fundamentals',
+      topics: [
+        {
+          id: 'tt_ujs_w2_mon',
+          dayOfWeek: 'Monday',
+          timeSlot: '08:30 - 10:00',
+          topicTitle: 'Introduction to Artificial Intelligence',
+          learningArea: 'Artificial Intelligence and C Programming',
+          facilitator: facilitatorName,
+          practicalActivity: 'Identify examples of AI',
+          curriculumTopicId: 'top-ujs-w2-mon',
+        },
+        {
+          id: 'tt_ujs_w2_tue',
+          dayOfWeek: 'Tuesday',
+          timeSlot: '08:30 - 10:00',
+          topicTitle: 'Applications of AI',
+          learningArea: 'Artificial Intelligence and C Programming',
+          facilitator: facilitatorName,
+          practicalActivity: 'Explore AI tools and their uses',
+          curriculumTopicId: 'top-ujs-w2-tue',
+        },
+        {
+          id: 'tt_ujs_w2_wed',
+          dayOfWeek: 'Wednesday',
+          timeSlot: '08:30 - 10:00',
+          topicTitle: 'Introduction to C programming',
+          learningArea: 'Artificial Intelligence and C Programming',
+          facilitator: facilitatorName,
+          practicalActivity: 'Write your first C program',
+          curriculumTopicId: 'top-ujs-w2-wed',
+        },
+        {
+          id: 'tt_ujs_w2_thu',
+          dayOfWeek: 'Thursday',
+          timeSlot: '08:30 - 10:00',
+          topicTitle: 'Variables and data types in C',
+          learningArea: 'Artificial Intelligence and C Programming',
+          facilitator: facilitatorName,
+          practicalActivity: 'Create a simple calculator',
+          curriculumTopicId: 'top-ujs-w2-thu',
+        },
+        {
+          id: 'tt_ujs_w2_fri',
+          dayOfWeek: 'Friday',
+          timeSlot: '08:30 - 10:00',
+          topicTitle: 'Conditions and loops in C',
+          learningArea: 'Artificial Intelligence and C Programming',
+          facilitator: facilitatorName,
+          practicalActivity: 'Build a number guessing game',
+          curriculumTopicId: 'top-ujs-w2-fri',
+        },
+      ],
+    },
+    {
+      weekNumber: 3,
+      weekLabel: 'Week 3: C++ and Arduino Programming',
+      startDate: '2026-11-16',
+      endDate: '2026-11-20',
+      weeklyTheme: '16–20 November • C++ programming logic and hands-on Arduino hardware control',
+      topics: [
+        {
+          id: 'tt_ujs_w3_mon',
+          dayOfWeek: 'Monday',
+          timeSlot: '08:30 - 10:00',
+          topicTitle: 'Introduction to C++',
+          learningArea: 'C++ and Arduino Programming',
+          facilitator: facilitatorName,
+          practicalActivity: 'Print your name using C++',
+          curriculumTopicId: 'top-ujs-w3-mon',
+        },
+        {
+          id: 'tt_ujs_w3_tue',
+          dayOfWeek: 'Tuesday',
+          timeSlot: '08:30 - 10:00',
+          topicTitle: 'Variables and operators',
+          learningArea: 'C++ and Arduino Programming',
+          facilitator: facilitatorName,
+          practicalActivity: 'Perform arithmetic operations',
+          curriculumTopicId: 'top-ujs-w3-tue',
+        },
+        {
+          id: 'tt_ujs_w3_wed',
+          dayOfWeek: 'Wednesday',
+          timeSlot: '08:30 - 10:00',
+          topicTitle: 'Conditions and loops',
+          learningArea: 'C++ and Arduino Programming',
+          facilitator: facilitatorName,
+          practicalActivity: 'Print stars and triangles',
+          curriculumTopicId: 'top-ujs-w3-wed',
+        },
+        {
+          id: 'tt_ujs_w3_thu',
+          dayOfWeek: 'Thursday',
+          timeSlot: '08:30 - 10:00',
+          topicTitle: 'Introduction to Arduino',
+          learningArea: 'C++ and Arduino Programming',
+          facilitator: facilitatorName,
+          practicalActivity: 'Identify Arduino board components',
+          curriculumTopicId: 'top-ujs-w3-thu',
+        },
+        {
+          id: 'tt_ujs_w3_fri',
+          dayOfWeek: 'Friday',
+          timeSlot: '08:30 - 10:00',
+          topicTitle: 'Arduino programming',
+          learningArea: 'C++ and Arduino Programming',
+          facilitator: facilitatorName,
+          practicalActivity: 'Blink an LED',
+          curriculumTopicId: 'top-ujs-w3-fri',
+        },
+      ],
+    },
+    {
+      weekNumber: 4,
+      weekLabel: 'Week 4: DBMS and Database',
+      startDate: '2026-11-23',
+      endDate: '2026-11-27',
+      weeklyTheme: '23–27 November • Databases, DBMS exploration, and SQL table operations',
+      topics: [
+        {
+          id: 'tt_ujs_w4_mon',
+          dayOfWeek: 'Monday',
+          timeSlot: '08:30 - 10:00',
+          topicTitle: 'Introduction to databases',
+          learningArea: 'DBMS and Database',
+          facilitator: facilitatorName,
+          practicalActivity: 'Identify database applications',
+          curriculumTopicId: 'top-ujs-w4-mon',
+        },
+        {
+          id: 'tt_ujs_w4_tue',
+          dayOfWeek: 'Tuesday',
+          timeSlot: '08:30 - 10:00',
+          topicTitle: 'Introduction to DBMS',
+          learningArea: 'DBMS and Database',
+          facilitator: facilitatorName,
+          practicalActivity: 'Explore database management',
+          curriculumTopicId: 'top-ujs-w4-tue',
+        },
+        {
+          id: 'tt_ujs_w4_wed',
+          dayOfWeek: 'Wednesday',
+          timeSlot: '08:30 - 10:00',
+          topicTitle: 'SQL and CREATE TABLE',
+          learningArea: 'DBMS and Database',
+          facilitator: facilitatorName,
+          practicalActivity: 'Create a students table',
+          curriculumTopicId: 'top-ujs-w4-wed',
+        },
+        {
+          id: 'tt_ujs_w4_thu',
+          dayOfWeek: 'Thursday',
+          timeSlot: '08:30 - 10:00',
+          topicTitle: 'INSERT, SELECT and UPDATE',
+          learningArea: 'DBMS and Database',
+          facilitator: facilitatorName,
+          practicalActivity: 'Add and retrieve student records',
+          curriculumTopicId: 'top-ujs-w4-thu',
+        },
+        {
+          id: 'tt_ujs_w4_fri',
+          dayOfWeek: 'Friday',
+          timeSlot: '08:30 - 10:00',
+          topicTitle: 'DELETE and database operations',
+          learningArea: 'DBMS and Database',
+          facilitator: facilitatorName,
+          practicalActivity: 'Build a simple student database',
+          curriculumTopicId: 'top-ujs-w4-fri',
+        },
+      ],
+    },
+    {
+      weekNumber: 5,
+      weekLabel: 'Week 5: Python, Java and JavaScript',
+      startDate: '2026-11-30',
+      endDate: '2026-12-04',
+      weeklyTheme: '30 November–4 December • Multi-language coding with Python, Java, and interactive JavaScript',
+      topics: [
+        {
+          id: 'tt_ujs_w5_mon',
+          dayOfWeek: 'Monday',
+          timeSlot: '08:30 - 10:00',
+          topicTitle: 'Introduction to Python',
+          learningArea: 'Python, Java and JavaScript',
+          facilitator: facilitatorName,
+          practicalActivity: 'Print Hello World',
+          curriculumTopicId: 'top-ujs-w5-mon',
+        },
+        {
+          id: 'tt_ujs_w5_tue',
+          dayOfWeek: 'Tuesday',
+          timeSlot: '08:30 - 10:00',
+          topicTitle: 'Python variables and operators',
+          learningArea: 'Python, Java and JavaScript',
+          facilitator: facilitatorName,
+          practicalActivity: 'Build a calculator',
+          curriculumTopicId: 'top-ujs-w5-tue',
+        },
+        {
+          id: 'tt_ujs_w5_wed',
+          dayOfWeek: 'Wednesday',
+          timeSlot: '08:30 - 10:00',
+          topicTitle: 'Introduction to Java',
+          learningArea: 'Python, Java and JavaScript',
+          facilitator: facilitatorName,
+          practicalActivity: 'Write a simple Java program',
+          curriculumTopicId: 'top-ujs-w5-wed',
+        },
+        {
+          id: 'tt_ujs_w5_thu',
+          dayOfWeek: 'Thursday',
+          timeSlot: '08:30 - 10:00',
+          topicTitle: 'Introduction to JavaScript',
+          learningArea: 'Python, Java and JavaScript',
+          facilitator: facilitatorName,
+          practicalActivity: 'Display messages on a webpage',
+          curriculumTopicId: 'top-ujs-w5-thu',
+        },
+        {
+          id: 'tt_ujs_w5_fri',
+          dayOfWeek: 'Friday',
+          timeSlot: '08:30 - 10:00',
+          topicTitle: 'JavaScript functions and events',
+          learningArea: 'Python, Java and JavaScript',
+          facilitator: facilitatorName,
+          practicalActivity: 'Create an interactive button',
+          curriculumTopicId: 'top-ujs-w5-fri',
+        },
+      ],
+    },
+    {
+      weekNumber: 6,
+      weekLabel: 'Week 6: Libraries and Projects',
+      startDate: '2026-12-07',
+      endDate: '2026-12-11',
+      weeklyTheme: '7–11 December • Programming libraries, project planning, development, and presentation prep',
+      topics: [
+        {
+          id: 'tt_ujs_w6_mon',
+          dayOfWeek: 'Monday',
+          timeSlot: '08:30 - 10:00',
+          topicTitle: 'Introduction to programming libraries',
+          learningArea: 'Libraries and Projects',
+          facilitator: facilitatorName,
+          practicalActivity: 'Explore useful libraries',
+          curriculumTopicId: 'top-ujs-w6-mon',
+        },
+        {
+          id: 'tt_ujs_w6_tue',
+          dayOfWeek: 'Tuesday',
+          timeSlot: '08:30 - 10:00',
+          topicTitle: 'Using libraries',
+          learningArea: 'Libraries and Projects',
+          facilitator: facilitatorName,
+          practicalActivity: 'Import and use a library',
+          curriculumTopicId: 'top-ujs-w6-tue',
+        },
+        {
+          id: 'tt_ujs_w6_wed',
+          dayOfWeek: 'Wednesday',
+          timeSlot: '08:30 - 10:00',
+          topicTitle: 'Project planning',
+          learningArea: 'Libraries and Projects',
+          facilitator: facilitatorName,
+          practicalActivity: 'Choose and plan your project',
+          curriculumTopicId: 'top-ujs-w6-wed',
+        },
+        {
+          id: 'tt_ujs_w6_thu',
+          dayOfWeek: 'Thursday',
+          timeSlot: '08:30 - 10:00',
+          topicTitle: 'Project development',
+          learningArea: 'Libraries and Projects',
+          facilitator: facilitatorName,
+          practicalActivity: 'Build your project',
+          curriculumTopicId: 'top-ujs-w6-thu',
+        },
+        {
+          id: 'tt_ujs_w6_fri',
+          dayOfWeek: 'Friday',
+          timeSlot: '08:30 - 10:00',
+          topicTitle: 'Project testing and preparation',
+          learningArea: 'Libraries and Projects',
+          facilitator: facilitatorName,
+          practicalActivity: 'Test and prepare your presentation',
+          curriculumTopicId: 'top-ujs-w6-fri',
+        },
+      ],
+    },
+  ];
+}
+
 export async function seedNovDecHolidayTimetable(
   cohort: Cohort,
   createdBy: string,
-  programmeTerm: string = 'Nov/Dec Holiday 2026'
+  programmeTerm: string = 'Nov/Dec Holiday 2026',
+  classContext?: CohortClass,
+  options?: { replaceExisting?: boolean }
 ): Promise<WeeklyTimetableEntry[]> {
-  const existing = await getWeeklyTimetable(cohort.id);
+  const allCohortEntries = await getWeeklyTimetable(cohort.id, classContext?.id);
+  const scopedExisting = classContext
+    ? allCohortEntries
+    : allCohortEntries.filter((e) => !e.classId);
+
+  let remainingExisting = scopedExisting;
+  if (options?.replaceExisting) {
+    const toDelete = scopedExisting.filter((e) => e.programmeTerm === programmeTerm);
+    for (const oldEntry of toDelete) {
+      await deleteWeeklyTimetableEntry(oldEntry.id);
+    }
+    remainingExisting = scopedExisting.filter((e) => e.programmeTerm !== programmeTerm);
+  }
+
   const existingWeeks = new Set(
-    existing
+    remainingExisting
       .filter((e) => e.programmeTerm === programmeTerm)
       .map((e) => e.weekNumber)
   );
 
-  const templates = buildNovDecHolidayWeekTemplates(cohort.teacherName || createdBy || 'Sangurur Staff');
+  const facilitator = classContext?.teacherName || cohort.teacherName || createdBy || 'Sangurur Staff';
+  const useUpperJuniorSenior = isUpperJuniorSeniorTrack(classContext, cohort);
+  const templates = useUpperJuniorSenior
+    ? buildUpperJuniorSeniorWeekTemplates(facilitator)
+    : buildNovDecHolidayWeekTemplates(facilitator);
   const created: WeeklyTimetableEntry[] = [];
 
   for (const tmpl of templates) {
     if (existingWeeks.has(tmpl.weekNumber)) continue;
+    const classCourses = classContext?.coursesOffered || [];
+    const mappedTopics = useUpperJuniorSenior
+      ? tmpl.topics.map((slot) => ({
+          ...slot,
+          id: `${slot.id}_${classContext?.id?.slice(-4) || 'c'}`,
+        }))
+      : classCourses.length > 0
+      ? tmpl.topics.map((slot, idx) => ({
+          ...slot,
+          id: `${slot.id}_${classContext?.id?.slice(-4) || 'c'}`,
+          learningArea: classCourses[idx % classCourses.length]?.title || slot.learningArea,
+        }))
+      : tmpl.topics;
+
+    const rawWeekLabel = classContext ? `${tmpl.weekLabel} (${classContext.name})` : tmpl.weekLabel;
     const entry = await createWeeklyTimetableEntry({
       cohortId: cohort.id,
       cohortCode: cohort.code,
+      ...(classContext
+        ? {
+            levelId: classContext.levelId,
+            levelName: classContext.levelName,
+            classId: classContext.id,
+            className: classContext.name,
+          }
+        : {}),
       programmeTerm,
       weekNumber: tmpl.weekNumber,
-      weekLabel: tmpl.weekLabel,
+      weekLabel: rawWeekLabel.slice(0, 128),
       startDate: tmpl.startDate,
       endDate: tmpl.endDate,
       weeklyTheme: tmpl.weeklyTheme,
-      topics: tmpl.topics,
+      topics: mappedTopics,
       createdBy: createdBy || 'Sangurur Staff',
     });
     created.push(entry);
   }
 
-  return [...existing, ...created].sort((a, b) => {
+  const refreshed = classContext
+    ? [...remainingExisting, ...created]
+    : [...allCohortEntries.filter((e) => Boolean(e.classId)), ...remainingExisting, ...created];
+
+  return refreshed.sort((a, b) => {
     if (a.startDate !== b.startDate) return a.startDate.localeCompare(b.startDate);
     return (a.weekNumber || 0) - (b.weekNumber || 0);
   });
@@ -1146,6 +1963,10 @@ async function getNextLearnerDigitalIdsDirect(count: number): Promise<string[]> 
 export async function createLearnerDirect(params: {
   fullName: string;
   cohortId: string;
+  levelId?: string;
+  levelName?: string;
+  classId?: string;
+  className?: string;
   gender?: 'male' | 'female' | 'other' | 'prefer_not_to_say';
   age?: number;
   schoolName?: string;
@@ -1164,6 +1985,22 @@ export async function createLearnerDirect(params: {
     const cohortSnap = await getDoc(doc(db, 'cohorts', params.cohortId));
     if (!cohortSnap.exists()) {
       throw new Error('Selected cohort was not found.');
+    }
+
+    let resolvedLevelId = params.levelId || null;
+    let resolvedLevelName = params.levelName || null;
+    let resolvedClassId = params.classId || null;
+    let resolvedClassName = params.className || null;
+
+    if (params.classId) {
+      const classSnap = await getDoc(doc(db, 'cohortClasses', params.classId));
+      if (classSnap.exists()) {
+        const clsData = classSnap.data() as CohortClass;
+        resolvedClassId = classSnap.id;
+        resolvedClassName = clsData.name;
+        resolvedLevelId = clsData.levelId;
+        resolvedLevelName = clsData.levelName;
+      }
     }
 
     let digitalId = '';
@@ -1196,6 +2033,11 @@ export async function createLearnerDirect(params: {
       grade: params.grade?.trim() || null,
       guardianContact: params.guardianContact?.trim() || null,
       assignedCohortIds: [params.cohortId],
+      assignedClassIds: resolvedClassId ? [resolvedClassId] : [],
+      levelId: resolvedLevelId,
+      levelName: resolvedLevelName,
+      classId: resolvedClassId,
+      className: resolvedClassName,
       mustChangePassword: true,
       isFirstLogin: true,
       status: 'ACTIVE' as const,
@@ -1215,6 +2057,8 @@ export async function createLearnerDirect(params: {
       learnerId: docId,
       learnerName: newLearnerRecord.fullName,
       learnerCode: digitalId,
+      ...(resolvedLevelId ? { levelId: resolvedLevelId, levelName: resolvedLevelName } : {}),
+      ...(resolvedClassId ? { classId: resolvedClassId, className: resolvedClassName } : {}),
       joinedAt: now,
       status: 'active',
     });
@@ -1226,7 +2070,7 @@ export async function createLearnerDirect(params: {
       action: 'CREATE_LEARNER',
       targetEntity: 'learner',
       targetId: docId,
-      details: `Registered learner ${newLearnerRecord.fullName} with Digital ID ${digitalId} in cohort ${params.cohortId}.`,
+      details: `Registered learner ${newLearnerRecord.fullName} with Digital ID ${digitalId} in cohort ${params.cohortId}${resolvedClassName ? ` (${resolvedLevelName || ''} / ${resolvedClassName})` : ''}.`,
     });
 
     const { passwordHash: _ph, salt: _s, ...publicLearner } = newLearnerRecord;
@@ -1245,6 +2089,10 @@ export async function createLearnerDirect(params: {
 
 export async function bulkImportLearnersDirect(params: {
   cohortId: string;
+  levelId?: string;
+  levelName?: string;
+  classId?: string;
+  className?: string;
   learners: Array<{
     fullName: string;
     schoolName?: string;
@@ -1265,6 +2113,22 @@ export async function bulkImportLearnersDirect(params: {
     const cohortSnap = await getDoc(doc(db, 'cohorts', params.cohortId));
     if (!cohortSnap.exists()) {
       throw new Error('Selected cohort was not found.');
+    }
+
+    let resolvedLevelId = params.levelId || null;
+    let resolvedLevelName = params.levelName || null;
+    let resolvedClassId = params.classId || null;
+    let resolvedClassName = params.className || null;
+
+    if (params.classId) {
+      const classSnap = await getDoc(doc(db, 'cohortClasses', params.classId));
+      if (classSnap.exists()) {
+        const clsData = classSnap.data() as CohortClass;
+        resolvedClassId = classSnap.id;
+        resolvedClassName = clsData.name;
+        resolvedLevelId = clsData.levelId;
+        resolvedLevelName = clsData.levelName;
+      }
     }
 
     const validItems = params.learners.filter((item) => String(item.fullName || '').trim().length > 0);
@@ -1298,6 +2162,11 @@ export async function bulkImportLearnersDirect(params: {
           grade: item.grade?.trim() || null,
           guardianContact: item.guardianContact?.trim() || null,
           assignedCohortIds: [params.cohortId],
+          assignedClassIds: resolvedClassId ? [resolvedClassId] : [],
+          levelId: resolvedLevelId,
+          levelName: resolvedLevelName,
+          classId: resolvedClassId,
+          className: resolvedClassName,
           mustChangePassword: true,
           isFirstLogin: true,
           status: 'ACTIVE' as const,
@@ -1317,6 +2186,8 @@ export async function bulkImportLearnersDirect(params: {
           learnerId: docId,
           learnerName: fullName,
           learnerCode: digitalId,
+          ...(resolvedLevelId ? { levelId: resolvedLevelId, levelName: resolvedLevelName } : {}),
+          ...(resolvedClassId ? { classId: resolvedClassId, className: resolvedClassName } : {}),
           joinedAt: now,
           status: 'active',
         });
@@ -1338,7 +2209,7 @@ export async function bulkImportLearnersDirect(params: {
       action: 'BULK_IMPORT_LEARNERS',
       targetEntity: 'cohort',
       targetId: params.cohortId,
-      details: `Bulk imported ${createdList.length} learners into cohort ${params.cohortId} (${allocatedIds[0]} to ${allocatedIds[allocatedIds.length - 1]}).`,
+      details: `Bulk imported ${createdList.length} learners into cohort ${params.cohortId}${resolvedClassName ? ` (${resolvedClassName})` : ''} (${allocatedIds[0]} to ${allocatedIds[allocatedIds.length - 1]}).`,
     });
 
     return {

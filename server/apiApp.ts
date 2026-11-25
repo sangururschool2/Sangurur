@@ -1255,6 +1255,11 @@ export function createApiApp(options?: { isServerless?: boolean }): Express {
         fullName: learnerData.fullName,
         username: learnerData.username || digitalId,
         assignedCohortIds: learnerData.assignedCohortIds || [],
+        assignedClassIds: learnerData.assignedClassIds || [],
+        levelId: learnerData.levelId || null,
+        levelName: learnerData.levelName || null,
+        classId: learnerData.classId || null,
+        className: learnerData.className || null,
         mustChangePassword,
         isFirstLogin: mustChangePassword,
         status: learnerData.status || 'ACTIVE',
@@ -1385,7 +1390,7 @@ export function createApiApp(options?: { isServerless?: boolean }): Express {
     }
   });
 
-  // Scoped Learner Endpoints (Strictly enforces assigned cohorts)
+  // Scoped Learner Endpoints (Strictly enforces assigned cohorts & classes)
   app.get('/api/learner/cohorts', requireLearnerAuth, async (req: AuthenticatedLearnerRequest, res: Response) => {
     const { db } = getServerDbAdapter();
     try {
@@ -1394,13 +1399,25 @@ export function createApiApp(options?: { isServerless?: boolean }): Express {
       }
       const assignedIds: string[] = req.authLearner.assignedCohortIds || [];
       if (assignedIds.length === 0) {
-        return res.json({ success: true, cohorts: [] });
+        return res.json({ success: true, cohorts: [], levels: [], classes: [] });
       }
-      const docs = await db.getCollectionDocs('cohorts');
+      const [docs, levelDocs, classDocs] = await Promise.all([
+        db.getCollectionDocs('cohorts'),
+        db.getCollectionDocs('cohortLevels'),
+        db.getCollectionDocs('cohortClasses'),
+      ]);
       const cohorts = docs
         .map((d) => ({ ...d.data(), id: d.id }))
         .filter((c: any) => assignedIds.includes(c.id) || assignedIds.includes(c.code));
-      return res.json({ success: true, cohorts });
+      const cohortIdSet = new Set(cohorts.map((c: any) => c.id));
+      const levels = levelDocs
+        .map((d) => ({ ...d.data(), id: d.id }))
+        .filter((lvl: any) => cohortIdSet.has(lvl.cohortId));
+      const classes = classDocs
+        .map((d) => ({ ...d.data(), id: d.id }))
+        .filter((cls: any) => cohortIdSet.has(cls.cohortId));
+
+      return res.json({ success: true, cohorts, levels, classes });
     } catch (err: any) {
       const formatted = formatServerFirestoreError(err, db, 'Failed to load assigned cohorts');
       return res.status(formatted.status).json({ error: formatted.message });
@@ -1490,13 +1507,26 @@ export function createApiApp(options?: { isServerless?: boolean }): Express {
         return res.status(403).json({ error: 'Access denied: you are not assigned to this cohort.' });
       }
 
+      const classId = req.query.classId
+        ? String(req.query.classId).trim()
+        : req.authLearner.classId
+        ? String(req.authLearner.classId).trim()
+        : '';
+
       const docs = await db.queryWhere('weeklyTimetables', [['cohortId', '==', cohortId]]);
-      const entries = docs
-        .map((d) => ({ ...d.data(), id: d.id }))
-        .sort((a: any, b: any) => {
-          if (a.startDate !== b.startDate) return String(a.startDate || '').localeCompare(String(b.startDate || ''));
-          return (Number(a.weekNumber) || 0) - (Number(b.weekNumber) || 0);
-        });
+      const allEntries = docs.map((d) => ({ ...d.data(), id: d.id })) as any[];
+      const classSpecific = classId ? allEntries.filter((e) => e.classId === classId) : [];
+      const fallbackCohortWide = allEntries.filter((e) => !e.classId);
+      const selectedEntries = classId
+        ? classSpecific.length > 0
+          ? classSpecific
+          : fallbackCohortWide
+        : allEntries;
+
+      const entries = selectedEntries.sort((a: any, b: any) => {
+        if (a.startDate !== b.startDate) return String(a.startDate || '').localeCompare(String(b.startDate || ''));
+        return (Number(a.weekNumber) || 0) - (Number(b.weekNumber) || 0);
+      });
       return res.json({ success: true, entries });
     } catch (err: any) {
       const formatted = formatServerFirestoreError(err, db, 'Failed to load weekly timetable');
@@ -1536,6 +1566,10 @@ export function createApiApp(options?: { isServerless?: boolean }): Express {
       const {
         fullName,
         cohortId,
+        levelId,
+        levelName,
+        classId,
+        className,
         gender,
         age,
         schoolName,
@@ -1562,6 +1596,22 @@ export function createApiApp(options?: { isServerless?: boolean }): Express {
         authTeacher.uid === DEFAULT_TEACHER_UID;
       if (!hasSchoolWideAccess && cohortSnap.data()?.teacherId !== authTeacher.uid) {
         return res.status(403).json({ error: 'Access denied: you are not assigned to this cohort.' });
+      }
+
+      let resolvedLevelId = levelId ? String(levelId).trim() : null;
+      let resolvedLevelName = levelName ? String(levelName).trim() : null;
+      let resolvedClassId = classId ? String(classId).trim() : null;
+      let resolvedClassName = className ? String(className).trim() : null;
+
+      if (resolvedClassId) {
+        const classSnap = await db.getDoc('cohortClasses', resolvedClassId);
+        if (classSnap.exists) {
+          const cls = classSnap.data() || {};
+          resolvedClassId = classSnap.id;
+          resolvedClassName = cls.name || resolvedClassName;
+          resolvedLevelId = cls.levelId || resolvedLevelId;
+          resolvedLevelName = cls.levelName || resolvedLevelName;
+        }
       }
 
       let digitalId = '';
@@ -1602,6 +1652,11 @@ export function createApiApp(options?: { isServerless?: boolean }): Express {
         grade: normalizedGrade,
         guardianContact: guardianContact || null,
         assignedCohortIds: [cohortId],
+        assignedClassIds: resolvedClassId ? [resolvedClassId] : [],
+        levelId: resolvedLevelId,
+        levelName: resolvedLevelName,
+        classId: resolvedClassId,
+        className: resolvedClassName,
         mustChangePassword: true,
         isFirstLogin: true,
         status: 'ACTIVE',
@@ -1621,6 +1676,8 @@ export function createApiApp(options?: { isServerless?: boolean }): Express {
         learnerId: docId,
         learnerName: newLearner.fullName,
         learnerCode: digitalId,
+        ...(resolvedLevelId ? { levelId: resolvedLevelId, levelName: resolvedLevelName } : {}),
+        ...(resolvedClassId ? { classId: resolvedClassId, className: resolvedClassName } : {}),
         joinedAt: new Date().toISOString(),
         status: 'active',
       });
@@ -1632,7 +1689,7 @@ export function createApiApp(options?: { isServerless?: boolean }): Express {
         action: 'CREATE_LEARNER',
         targetEntity: 'learner',
         targetId: docId,
-        details: `Registered learner ${newLearner.fullName} with Digital ID ${digitalId} in cohort ${cohortId}.`,
+        details: `Registered learner ${newLearner.fullName} with Digital ID ${digitalId} in cohort ${cohortId}${resolvedClassName ? ` (${resolvedLevelName || ''} / ${resolvedClassName})` : ''}.`,
       });
 
       return res.json({
@@ -1656,7 +1713,7 @@ export function createApiApp(options?: { isServerless?: boolean }): Express {
     const { db } = getServerDbAdapter();
     try {
       const authTeacher = req.authTeacher!;
-      const { cohortId, learners } = req.body;
+      const { cohortId, levelId, levelName, classId, className, learners } = req.body;
       if (!cohortId || !Array.isArray(learners) || learners.length === 0) {
         return res.status(400).json({ error: 'Cohort ID and a list of learners are required' });
       }
@@ -1675,6 +1732,22 @@ export function createApiApp(options?: { isServerless?: boolean }): Express {
         authTeacher.uid === DEFAULT_TEACHER_UID;
       if (!hasSchoolWideAccess && cohortSnap.data()?.teacherId !== authTeacher.uid) {
         return res.status(403).json({ error: 'Access denied: you are not assigned to this cohort.' });
+      }
+
+      let resolvedLevelId = levelId ? String(levelId).trim() : null;
+      let resolvedLevelName = levelName ? String(levelName).trim() : null;
+      let resolvedClassId = classId ? String(classId).trim() : null;
+      let resolvedClassName = className ? String(className).trim() : null;
+
+      if (resolvedClassId) {
+        const classSnap = await db.getDoc('cohortClasses', resolvedClassId);
+        if (classSnap.exists) {
+          const cls = classSnap.data() || {};
+          resolvedClassId = classSnap.id;
+          resolvedClassName = cls.name || resolvedClassName;
+          resolvedLevelId = cls.levelId || resolvedLevelId;
+          resolvedLevelName = cls.levelName || resolvedLevelName;
+        }
       }
 
       const validItems = learners.filter((item: any) => String(item?.fullName || '').trim().length > 0);
@@ -1720,6 +1793,11 @@ export function createApiApp(options?: { isServerless?: boolean }): Express {
             grade: normalizedGrade,
             guardianContact: item.guardianContact || null,
             assignedCohortIds: [cohortId],
+            assignedClassIds: resolvedClassId ? [resolvedClassId] : [],
+            levelId: resolvedLevelId,
+            levelName: resolvedLevelName,
+            classId: resolvedClassId,
+            className: resolvedClassName,
             mustChangePassword: true,
             isFirstLogin: true,
             status: 'ACTIVE',
@@ -1739,6 +1817,8 @@ export function createApiApp(options?: { isServerless?: boolean }): Express {
             learnerId: docId,
             learnerName: fullName,
             learnerCode: digitalId,
+            ...(resolvedLevelId ? { levelId: resolvedLevelId, levelName: resolvedLevelName } : {}),
+            ...(resolvedClassId ? { classId: resolvedClassId, className: resolvedClassName } : {}),
             joinedAt: new Date().toISOString(),
             status: 'active',
           });
@@ -1868,6 +1948,10 @@ export function createApiApp(options?: { isServerless?: boolean }): Express {
       const {
         cohortId,
         cohortCode,
+        levelId,
+        levelName,
+        classId,
+        className,
         learnerDocId,
         date: requestedDate,
         status,
@@ -1965,11 +2049,19 @@ export function createApiApp(options?: { isServerless?: boolean }): Express {
       }
 
       const docId = `reg_${cohortId}_${authLearner.id}_${targetDate}`;
+      const resolvedLevelId = levelId ? String(levelId).slice(0, 128) : authLearner.levelId || null;
+      const resolvedLevelName = levelName ? String(levelName).slice(0, 128) : authLearner.levelName || null;
+      const resolvedClassId = classId ? String(classId).slice(0, 128) : authLearner.classId || null;
+      const resolvedClassName = className ? String(className).slice(0, 128) : authLearner.className || null;
 
       const payload: any = {
         id: docId,
         cohortId,
         cohortCode: cohortCode || cohortData.code || 'COHORT',
+        levelId: resolvedLevelId,
+        levelName: resolvedLevelName,
+        classId: resolvedClassId,
+        className: resolvedClassName,
         learnerDocId: authLearner.id,
         learnerId: authLearner.digitalId || authLearner.learnerId,
         learnerName: authLearner.fullName,

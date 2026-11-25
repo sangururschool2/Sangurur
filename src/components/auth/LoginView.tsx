@@ -129,16 +129,16 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLearnerLoginSuccess }) =
               <SchoolLogo className="w-9 h-9 sm:w-10 sm:h-10" />
             </div>
             <div>
-              <h1 className="text-sm sm:text-base font-extrabold text-white tracking-tight leading-tight">
+              <h1 className="text-base sm:text-lg font-extrabold text-white tracking-tight leading-tight">
                 SANGURUR COMPREHENSIVE SCHOOL
               </h1>
-              <p className="text-[11px] font-semibold text-emerald-100 tracking-wider uppercase">
+              <p className="text-xs font-semibold text-emerald-100 tracking-wider uppercase">
                 Motto: Think, Code, Change the World
               </p>
             </div>
           </div>
           <div className="text-right hidden sm:block">
-            <span className="text-xs font-semibold text-emerald-100">
+            <span className="text-sm font-semibold text-emerald-100">
               Sangurur Digital Learner Register (SDLR)
             </span>
           </div>
@@ -165,7 +165,7 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLearnerLoginSuccess }) =
             <h2 className="text-lg sm:text-xl font-black tracking-tight leading-tight">
               SANGURUR DIGITAL LEARNER REGISTER
             </h2>
-            <p className="text-emerald-100 text-[11px] sm:text-xs mt-0.5 font-medium">
+            <p className="text-emerald-100 text-xs sm:text-sm mt-0.5 font-medium">
               Daily Attendance, Curriculum Progress & Understanding Register
             </p>
 
@@ -177,13 +177,13 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLearnerLoginSuccess }) =
                   setActivePortal('learner');
                   setError(null);
                 }}
-                className={`py-1.5 px-3 rounded-lg text-xs font-bold transition-all flex items-center justify-center space-x-1.5 ${
+                className={`py-1.5 px-3 rounded-lg text-sm font-bold transition-all flex items-center justify-center space-x-1.5 ${
                   activePortal === 'learner'
                     ? 'bg-white text-emerald-900 shadow-sm'
                     : 'text-white/80 hover:text-white'
                 }`}
               >
-                <User className="w-3.5 h-3.5" />
+                <User className="w-4 h-4" />
                 <span>Learner Portal</span>
               </button>
 
@@ -193,13 +193,13 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLearnerLoginSuccess }) =
                   setActivePortal('teacher');
                   setError(null);
                 }}
-                className={`py-1.5 px-3 rounded-lg text-xs font-bold transition-all flex items-center justify-center space-x-1.5 ${
+                className={`py-1.5 px-3 rounded-lg text-sm font-bold transition-all flex items-center justify-center space-x-1.5 ${
                   activePortal === 'teacher'
                     ? 'bg-white text-emerald-900 shadow-sm'
                     : 'text-white/80 hover:text-white'
                 }`}
               >
-                <ShieldCheck className="w-3.5 h-3.5" />
+                <ShieldCheck className="w-4 h-4" />
                 <span>Teacher & Staff</span>
               </button>
             </div>
@@ -207,7 +207,7 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLearnerLoginSuccess }) =
 
           <div className="relative z-10 flex-1 min-h-0 overflow-y-auto px-5 py-4 sm:px-6 sm:py-5 bg-white/80 backdrop-blur-[3px]">
             {error && (
-              <div className="mb-3 p-2.5 bg-rose-50/95 border border-rose-200 rounded-xl flex items-start space-x-2 text-xs text-rose-800">
+              <div className="mb-3 p-2.5 bg-rose-50/95 border border-rose-200 rounded-xl flex items-start space-x-2 text-sm text-rose-800">
                 <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
                 <span className="flex-1">{error}</span>
               </div>
@@ -217,26 +217,26 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLearnerLoginSuccess }) =
             {activePortal === 'learner' && (
               <form onSubmit={handleLearnerSubmit} className="space-y-3">
                 {adminSdkActive === false ? (
-                  <div className="bg-amber-50/95 border border-amber-200 rounded-xl p-2.5 text-[11px] text-amber-950">
+                  <div className="bg-amber-50/95 border border-amber-200 rounded-xl p-2.5 text-xs text-amber-950">
                     <p className="font-bold">Server Admin SDK Inactive</p>
                     <p className="mt-0.5 text-amber-900">
                       Digital ID login requires server-side Firebase Admin SDK access. Staff can sign in immediately via the <strong>Teacher &amp; Staff</strong> tab using Google Sign-In.
                     </p>
                   </div>
                 ) : (
-                  <div className="bg-blue-50/90 border border-blue-200 rounded-xl p-2.5 text-xs text-blue-900">
+                  <div className="bg-blue-50/90 border border-blue-200 rounded-xl p-2.5 text-sm text-blue-900">
                     <p className="font-bold flex items-center space-x-1">
-                      <Sparkles className="w-3.5 h-3.5 text-blue-600" />
+                      <Sparkles className="w-4 h-4 text-blue-600" />
                       <span>Welcome to your Daily Register!</span>
                     </p>
-                    <p className="mt-0.5 text-[11px] text-slate-700">
+                    <p className="mt-0.5 text-xs text-slate-700">
                       Enter your official Digital ID and password from your printed school access slip.
                     </p>
                   </div>
                 )}
 
                 <div>
-                  <label className="block text-[11px] font-bold text-slate-800 uppercase tracking-wider mb-1">
+                  <label className="block text-xs font-bold text-slate-800 uppercase tracking-wider mb-1">
                     Digital ID (Username)
                   </label>
                   <div className="relative">
@@ -255,7 +255,7 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLearnerLoginSuccess }) =
                 </div>
 
                 <div>
-                  <label className="block text-[11px] font-bold text-slate-800 uppercase tracking-wider mb-1">
+                  <label className="block text-xs font-bold text-slate-800 uppercase tracking-wider mb-1">
                     Password
                   </label>
                   <div className="relative">
@@ -271,7 +271,7 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLearnerLoginSuccess }) =
                       className="w-full pl-9 pr-3 py-2 bg-white/95 border border-slate-300 rounded-xl text-sm focus:ring-2 focus:ring-emerald-600 focus:border-emerald-600 outline-none transition"
                     />
                   </div>
-                  <p className="text-[11px] text-slate-700 font-medium mt-1">
+                  <p className="text-xs text-slate-700 font-medium mt-1">
                     On first login, you will be prompted to set a private password.
                   </p>
                 </div>
@@ -279,7 +279,7 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLearnerLoginSuccess }) =
                 <button
                   type="submit"
                   disabled={submitting}
-                  className="w-full py-2.5 px-4 bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 text-white font-bold rounded-xl shadow-md transition-all flex items-center justify-center space-x-2 text-sm"
+                  className="w-full py-2.5 px-4 bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 text-white font-bold rounded-xl shadow-md transition-all flex items-center justify-center space-x-2 text-base"
                 >
                   <span>{submitting ? 'Verifying...' : 'Sign In as Learner'}</span>
                   <ArrowRight className="w-4 h-4" />
@@ -290,12 +290,12 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLearnerLoginSuccess }) =
             {/* TEACHER & STAFF PORTAL */}
             {activePortal === 'teacher' && (
               <div className="space-y-2.5">
-                <div className="bg-emerald-50/90 border border-emerald-200 rounded-xl p-2.5 text-xs text-emerald-900">
+                <div className="bg-emerald-50/90 border border-emerald-200 rounded-xl p-2.5 text-sm text-emerald-900">
                   <p className="font-bold flex items-center space-x-1">
                     <ShieldCheck className="w-4 h-4 text-emerald-700" />
                     <span>Sangurur Staff & Administrator Access</span>
                   </p>
-                  <p className="mt-0.5 text-[11px] text-slate-700">
+                  <p className="mt-0.5 text-xs text-slate-700">
                     {adminSdkActive === false
                       ? 'Use "Sign In with Google Staff Account" below to manage cohorts, register learners, verify attendance, and export reports.'
                       : 'Sign in with your assigned staff credentials to manage cohorts, register learners, verify attendance, and export reports.'}
@@ -304,7 +304,7 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLearnerLoginSuccess }) =
 
                 <form onSubmit={handleTeacherSubmit} className="space-y-2.5">
                   <div>
-                    <label className="block text-[11px] font-bold text-slate-800 uppercase tracking-wider mb-1">
+                    <label className="block text-xs font-bold text-slate-800 uppercase tracking-wider mb-1">
                       Username
                     </label>
                     <div className="relative">
@@ -324,7 +324,7 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLearnerLoginSuccess }) =
                   </div>
 
                   <div>
-                    <label className="block text-[11px] font-bold text-slate-800 uppercase tracking-wider mb-1">
+                    <label className="block text-xs font-bold text-slate-800 uppercase tracking-wider mb-1">
                       Password
                     </label>
                     <div className="relative">
@@ -354,7 +354,7 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLearnerLoginSuccess }) =
                   <button
                     type="submit"
                     disabled={teacherSubmitting || googleSubmitting}
-                    className="w-full py-2.5 px-4 bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 text-white font-bold rounded-xl shadow-md transition-all flex items-center justify-center space-x-2 text-sm"
+                    className="w-full py-2.5 px-4 bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 text-white font-bold rounded-xl shadow-md transition-all flex items-center justify-center space-x-2 text-base"
                   >
                     <span>{teacherSubmitting ? 'Signing In...' : 'Sign In as Teacher'}</span>
                     <ArrowRight className="w-4 h-4" />
@@ -363,7 +363,7 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLearnerLoginSuccess }) =
 
                 <div className="relative flex items-center py-0.5">
                   <div className="flex-grow border-t border-slate-300/80" />
-                  <span className="shrink mx-3 text-[10px] font-bold uppercase tracking-wider text-slate-600">
+                  <span className="shrink mx-3 text-xs font-bold uppercase tracking-wider text-slate-600">
                     Or
                   </span>
                   <div className="flex-grow border-t border-slate-300/80" />
@@ -373,7 +373,7 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLearnerLoginSuccess }) =
                   type="button"
                   onClick={handleGoogleTeacherLogin}
                   disabled={loading || googleSubmitting || teacherSubmitting}
-                  className="w-full py-2 px-4 bg-white/95 hover:bg-white disabled:opacity-60 disabled:cursor-not-allowed border border-slate-300 text-slate-800 font-semibold rounded-xl shadow-xs transition-all flex items-center justify-center space-x-2 text-xs"
+                  className="w-full py-2 px-4 bg-white/95 hover:bg-white disabled:opacity-60 disabled:cursor-not-allowed border border-slate-300 text-slate-800 font-semibold rounded-xl shadow-xs transition-all flex items-center justify-center space-x-2 text-sm"
                 >
                   <svg className="w-4 h-4" viewBox="0 0 24 24">
                     <path
@@ -400,7 +400,7 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLearnerLoginSuccess }) =
           </div>
 
           {/* Footer note */}
-          <div className="relative z-10 shrink-0 bg-white/85 backdrop-blur-xs px-5 py-2 border-t border-slate-200/80 text-center text-[11px] text-slate-700">
+          <div className="relative z-10 shrink-0 bg-white/85 backdrop-blur-xs px-5 py-2 border-t border-slate-200/80 text-center text-xs text-slate-700">
             <span>Sangurur Comprehensive School • Kenya • </span>
             <span className="font-bold text-emerald-800">Think, Code, Change the World</span>
           </div>
@@ -408,7 +408,7 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLearnerLoginSuccess }) =
       </div>
 
       {/* Page Footer */}
-      <footer className="relative z-10 shrink-0 text-center py-2 text-[11px] text-slate-200 border-t border-white/15 bg-slate-950/65 backdrop-blur-md">
+      <footer className="relative z-10 shrink-0 text-center py-2 text-xs text-slate-200 border-t border-white/15 bg-slate-950/65 backdrop-blur-md">
         © 2026 Sangurur Comprehensive School • SDLR System v2.6.4 • Secure Education Records
       </footer>
     </div>

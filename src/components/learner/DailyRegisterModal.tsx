@@ -3,6 +3,8 @@ import confetti from 'canvas-confetti';
 import { useAuth } from '../../context/AuthContext';
 import {
   Cohort,
+  CohortLevel,
+  CohortClass,
   Learner,
   DailyRegister,
   AttendanceStatus,
@@ -32,6 +34,8 @@ import {
 
 interface DailyRegisterModalProps {
   cohort: Cohort;
+  cohortLevel?: CohortLevel | null;
+  cohortClass?: CohortClass | null;
   learner: Learner;
   existingSubmission?: DailyRegister | null;
   allRegisters?: DailyRegister[];
@@ -59,6 +63,8 @@ function getPreviousNairobiDate(baseYmd: string, daysBack = 1): string {
 
 export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
   cohort,
+  cohortLevel,
+  cohortClass,
   learner,
   existingSubmission,
   allRegisters = [],
@@ -140,11 +146,12 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
     return null;
   }, [allRegisters, selectedDate, nairobiToday, existingSubmission]);
 
-  // Load weekly timetable entries once per cohort via authenticated learner API
+  // Load weekly timetable entries scoped to cohort + class via authenticated learner API
   useEffect(() => {
     if (!learnerToken) return;
     let cancelled = false;
-    fetch(`/api/learner/timetable?cohortId=${encodeURIComponent(cohort.id)}`, {
+    const classQuery = cohortClass?.id ? `&classId=${encodeURIComponent(cohortClass.id)}` : '';
+    fetch(`/api/learner/timetable?cohortId=${encodeURIComponent(cohort.id)}${classQuery}`, {
       headers: { Authorization: `Bearer ${learnerToken}` },
     })
       .then((res) => (res.ok ? res.json() : { entries: [] }))
@@ -157,7 +164,7 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [cohort.id, learnerToken]);
+  }, [cohort.id, cohortClass?.id, learnerToken]);
 
   // Build topic list tailored to selectedDate's timetable week + curriculum snapshot
   useEffect(() => {
@@ -218,7 +225,10 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
       scheduleLabel?: string;
     }[] = [];
 
-    const areas = cohort.curriculumSnapshot?.learningAreas || [];
+    const areas =
+      cohortClass?.curriculumSnapshot?.learningAreas ||
+      cohort.curriculumSnapshot?.learningAreas ||
+      [];
     areas.forEach((area) => {
       area.modules.forEach((mod) => {
         mod.topics.forEach((top) => {
@@ -229,6 +239,39 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
             source: 'curriculum',
           });
         });
+      });
+    });
+
+    const existingAreaTitles = new Set(areas.map((a) => a.title.trim().toLowerCase()));
+    (cohortClass?.coursesOffered || []).forEach((course, idx) => {
+      if (existingAreaTitles.has(course.title.trim().toLowerCase())) return;
+      const syntheticTopic: Topic = {
+        id: `course_topic_${course.id || idx}`,
+        title: `${course.title} — Guided Class Session`,
+        description: course.description || `${cohortClass?.name || ''} course session`,
+        learningObjectives: [],
+        expectedDuration: course.hoursPerWeek || '2 hours',
+        order: idx + 1,
+      };
+      const syntheticArea: LearningArea = {
+        id: course.id,
+        title: course.title,
+        description: course.description || '',
+        modules: [],
+        order: idx + 1,
+      };
+      const syntheticModule: Module = {
+        id: `course_mod_${course.id}`,
+        title: course.code ? `${course.code} • Course Offered` : 'Class Course Offered',
+        description: course.description || '',
+        topics: [syntheticTopic],
+        order: 1,
+      };
+      curriculumItems.push({
+        topic: syntheticTopic,
+        learningArea: syntheticArea,
+        module: syntheticModule,
+        source: 'curriculum',
       });
     });
 
@@ -297,7 +340,7 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
     } else if (curriculumItems.length > 0) {
       setSelectedTopicId(curriculumItems[0].topic.id);
     }
-  }, [cohort, timetableEntries, selectedDate, existingForSelectedDate, nairobiToday]);
+  }, [cohort, cohortClass, timetableEntries, selectedDate, existingForSelectedDate, nairobiToday]);
 
   // Available unique learning areas for the learner to pick from
   const availableAreas = useMemo(() => {
@@ -339,7 +382,7 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
             Your register for today ({nairobiToday}) has already been submitted.
           </p>
 
-          <div className="mt-4 text-left bg-slate-50 p-4 rounded-xl text-xs space-y-1.5 border border-slate-200">
+          <div className="mt-4 text-left bg-slate-50 p-4 rounded-xl text-sm space-y-1.5 border border-slate-200">
             <div className="flex justify-between">
               <span className="text-slate-500">Date:</span>
               <span className="font-bold text-slate-800">{existingForSelectedDate.date} (EAT)</span>
@@ -390,7 +433,7 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
                 setStep(1);
                 setErrorMessage(null);
               }}
-              className="w-full py-2.5 bg-blue-50 hover:bg-blue-100 text-blue-900 border border-blue-200 font-bold rounded-xl text-xs flex items-center justify-center space-x-1.5 transition"
+              className="w-full py-2.5 bg-blue-50 hover:bg-blue-100 text-blue-900 border border-blue-200 font-bold rounded-xl text-sm flex items-center justify-center space-x-1.5 transition"
             >
               <History className="w-4 h-4 text-blue-700" />
               <span>Mark or Update a Previous Day</span>
@@ -474,6 +517,10 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
     const payload = {
       cohortId: cohort.id,
       cohortCode: cohort.code,
+      levelId: cohortLevel?.id || cohortClass?.levelId || learner.levelId || null,
+      levelName: cohortLevel?.name || cohortClass?.levelName || learner.levelName || null,
+      classId: cohortClass?.id || learner.classId || null,
+      className: cohortClass?.name || learner.className || null,
       learnerDocId: learner.id,
       learnerId: learner.learnerId,
       learnerName: learner.fullName,
@@ -551,6 +598,7 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
               </h3>
               <p className="text-emerald-100 text-xs">
                 Sangurur Comprehensive School • {cohort.name} ({cohort.code})
+                {cohortClass ? ` • ${cohortLevel?.name || cohortClass.levelName} → ${cohortClass.name}` : ''}
               </p>
             </div>
           </div>
@@ -570,7 +618,7 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
               return (
                 <span
                   key={s}
-                  className={`w-6 h-6 rounded-full flex items-center justify-center text-[11px] font-black transition-all ${
+                  className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-black transition-all ${
                     skipped
                       ? 'bg-slate-200 text-slate-400 line-through'
                       : step === s
@@ -585,7 +633,7 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
               );
             })}
           </div>
-          <span className="text-emerald-800 font-bold uppercase tracking-wider text-[11px]">
+          <span className="text-emerald-800 font-bold uppercase tracking-wider text-xs">
             {step === 1 && 'Section A: Date, Attendance & Study Status'}
             {step === 2 && 'Section B: Area & Topic Learned'}
             {step === 3 && 'Section C: Understanding Level'}
@@ -597,7 +645,7 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
         {/* Modal Body */}
         <div className="p-5 sm:p-6 flex-1 overflow-y-auto space-y-5">
           {errorMessage && (
-            <div className="p-3.5 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-800 flex items-center space-x-2">
+            <div className="p-3.5 bg-rose-50 border border-rose-200 rounded-xl text-sm text-rose-800 flex items-center space-x-2">
               <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
               <span>{errorMessage}</span>
             </div>
@@ -607,18 +655,21 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
           {step === 1 && (
             <div className="space-y-4">
               {/* Learner Metadata */}
-              <div className="bg-slate-50 p-3.5 rounded-xl border border-slate-200 grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+              <div className="bg-slate-50 p-3.5 rounded-xl border border-slate-200 grid grid-cols-1 sm:grid-cols-3 gap-3 text-sm">
                 <div>
-                  <span className="text-slate-400 block font-semibold">Learner</span>
+                  <span className="text-slate-500 text-xs block font-semibold">Learner</span>
                   <span className="font-bold text-slate-900">{learner.fullName}</span>
                 </div>
                 <div>
-                  <span className="text-slate-400 block font-semibold">Digital ID</span>
+                  <span className="text-slate-500 text-xs block font-semibold">Digital ID</span>
                   <span className="font-bold font-mono text-slate-900">{learner.learnerId}</span>
                 </div>
                 <div>
-                  <span className="text-slate-400 block font-semibold">Cohort</span>
-                  <span className="font-bold text-slate-900">{cohort.name}</span>
+                  <span className="text-slate-500 text-xs block font-semibold">Cohort & Class</span>
+                  <span className="font-bold text-slate-900">
+                    {cohort.name}
+                    {cohortClass ? ` • ${cohortClass.name}` : ''}
+                  </span>
                 </div>
               </div>
 
@@ -626,7 +677,7 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
               <div className="bg-blue-50/70 border border-blue-200 rounded-xl p-4 space-y-2.5">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <label className="text-xs font-bold text-blue-950 uppercase tracking-wider flex items-center space-x-1.5">
-                    <Calendar className="w-3.5 h-3.5 text-blue-700" />
+                    <Calendar className="w-4 h-4 text-blue-700" />
                     <span>Select Register Date (Today or Previous Day)</span>
                   </label>
                   <div className="flex items-center space-x-1.5">
@@ -636,7 +687,7 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
                         setSelectedDate(nairobiToday);
                         setErrorMessage(null);
                       }}
-                      className={`px-2.5 py-1 rounded-lg text-[11px] font-bold border transition ${
+                      className={`px-2.5 py-1 rounded-lg text-xs font-bold border transition ${
                         selectedDate === nairobiToday
                           ? 'bg-blue-700 text-white border-blue-700'
                           : 'bg-white text-blue-800 border-blue-200 hover:bg-blue-100'
@@ -650,7 +701,7 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
                         setSelectedDate(nairobiYesterday);
                         setErrorMessage(null);
                       }}
-                      className={`px-2.5 py-1 rounded-lg text-[11px] font-bold border transition ${
+                      className={`px-2.5 py-1 rounded-lg text-xs font-bold border transition ${
                         selectedDate === nairobiYesterday
                           ? 'bg-blue-700 text-white border-blue-700'
                           : 'bg-white text-blue-800 border-blue-200 hover:bg-blue-100'
@@ -673,9 +724,9 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
                         setErrorMessage(null);
                       }
                     }}
-                    className="px-3 py-2 bg-white border border-blue-300 rounded-xl text-xs font-bold text-slate-900 outline-none focus:ring-2 focus:ring-blue-600"
+                    className="px-3 py-2 bg-white border border-blue-300 rounded-xl text-sm font-bold text-slate-900 outline-none focus:ring-2 focus:ring-blue-600"
                   />
-                  <span className="text-[11px] text-blue-900 font-medium">
+                  <span className="text-xs text-blue-900 font-medium">
                     {isToday
                       ? 'Submitting today’s attendance register (Africa/Nairobi).'
                       : existingForSelectedDate
@@ -712,7 +763,7 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
                         }`}
                       />
                     </div>
-                    <p className="text-[11px] text-slate-600">
+                    <p className="text-xs text-slate-600">
                       I attended on time and learned a topic in class.
                     </p>
                   </button>
@@ -740,7 +791,7 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
                         }`}
                       />
                     </div>
-                    <p className="text-[11px] text-slate-600">
+                    <p className="text-xs text-slate-600">
                       I was present, but we could not study (e.g., power blackout).
                     </p>
                   </button>
@@ -766,7 +817,7 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
                         }`}
                       />
                     </div>
-                    <p className="text-[11px] text-slate-600">
+                    <p className="text-xs text-slate-600">
                       I arrived after class started and joined the study session.
                     </p>
                   </button>
@@ -794,7 +845,7 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
                         }`}
                       />
                     </div>
-                    <p className="text-[11px] text-slate-600">
+                    <p className="text-xs text-slate-600">
                       I arrived late and no study lesson took place.
                     </p>
                   </button>
@@ -807,7 +858,7 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
                       <span className="block text-xs font-extrabold text-amber-950 uppercase tracking-wider">
                         Reason Why You Did Not Study on {selectedDate} *
                       </span>
-                      <p className="text-[11px] text-amber-800">
+                      <p className="text-xs text-amber-800">
                         Select the cause so your teacher records why no topic was covered.
                       </p>
                     </div>
@@ -820,7 +871,7 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
                             key={reason}
                             type="button"
                             onClick={() => setSelectedReasonChip(reason)}
-                            className={`px-3 py-1.5 rounded-lg text-xs font-bold border transition ${
+                            className={`px-3 py-1.5 rounded-lg text-sm font-bold border transition ${
                               active
                                 ? 'bg-amber-600 text-white border-amber-700 shadow-xs'
                                 : 'bg-white text-slate-700 border-amber-200 hover:bg-amber-100'
@@ -834,7 +885,7 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
 
                     {selectedReasonChip === 'Other reason' && (
                       <div>
-                        <label className="block text-[11px] font-bold text-amber-900 mb-1">
+                        <label className="block text-xs font-bold text-amber-900 mb-1">
                           Specify Reason *
                         </label>
                         <input
@@ -843,14 +894,14 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
                           placeholder="e.g., Projector fault / Lab locked for exams..."
                           value={customReasonText}
                           onChange={(e) => setCustomReasonText(e.target.value)}
-                          className="w-full px-3 py-2 bg-white border border-amber-300 rounded-xl text-xs outline-none focus:ring-2 focus:ring-amber-600"
+                          className="w-full px-3 py-2 bg-white border border-amber-300 rounded-xl text-sm outline-none focus:ring-2 focus:ring-amber-600"
                         />
                       </div>
                     )}
                   </div>
                 )}
 
-                <p className="text-[11px] text-slate-500 mt-2 italic">
+                <p className="text-xs text-slate-500 mt-2 italic">
                   * Note: Absent and Excused statuses are officially recorded by your class teacher.
                 </p>
               </div>
@@ -860,18 +911,21 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
           {/* SECTION B: AREA LEARNED & CURRICULUM TOPIC */}
           {step === 2 && didStudy && (
             <div className="space-y-4">
-              <div className="bg-emerald-50 border border-emerald-200 p-3.5 rounded-xl text-xs text-emerald-900 flex flex-wrap items-center justify-between gap-2">
+              <div className="bg-emerald-50 border border-emerald-200 p-3.5 rounded-xl text-sm text-emerald-900 flex flex-wrap items-center justify-between gap-2">
                 <div>
                   <span className="font-bold">Logging Learning For: </span>
                   <span className="font-extrabold">{selectedDate}</span> •{' '}
                   <span className="font-semibold">
-                    {cohort.curriculumSnapshot?.curriculumTitle || cohort.programme}
+                    {cohortClass?.name ? `${cohortClass.name} • ` : ''}
+                    {cohortClass?.curriculumSnapshot?.curriculumTitle ||
+                      cohort.curriculumSnapshot?.curriculumTitle ||
+                      cohort.programme}
                   </span>
                 </div>
                 <button
                   type="button"
                   onClick={() => setUseCustomTopic((prev) => !prev)}
-                  className="text-[11px] font-bold text-blue-800 hover:underline"
+                  className="text-xs font-bold text-blue-800 hover:underline"
                 >
                   {useCustomTopic ? 'Choose from Curriculum / Timetable' : '+ Enter Other Area / Topic'}
                 </button>
@@ -880,7 +934,7 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
               {useCustomTopic ? (
                 <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 space-y-3">
                   <div>
-                    <label className="block text-xs font-bold text-slate-700 mb-1">
+                    <label className="block text-sm font-bold text-slate-700 mb-1">
                       Area Learned on {selectedDate} *
                     </label>
                     <input
@@ -888,11 +942,11 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
                       placeholder="e.g., Web Technology, Scratch Programming, Computer Fundamentals"
                       value={customAreaTitle}
                       onChange={(e) => setCustomAreaTitle(e.target.value)}
-                      className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs font-semibold outline-none focus:ring-2 focus:ring-emerald-600"
+                      className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-sm font-semibold outline-none focus:ring-2 focus:ring-emerald-600"
                     />
                   </div>
                   <div>
-                    <label className="block text-xs font-bold text-slate-700 mb-1">
+                    <label className="block text-sm font-bold text-slate-700 mb-1">
                       Specific Topic Learned on {selectedDate} *
                     </label>
                     <input
@@ -900,7 +954,7 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
                       placeholder="e.g., Flexbox Layout Cards / Keyboard Typing Practice"
                       value={customTopicTitle}
                       onChange={(e) => setCustomTopicTitle(e.target.value)}
-                      className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs font-semibold outline-none focus:ring-2 focus:ring-emerald-600"
+                      className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-sm font-semibold outline-none focus:ring-2 focus:ring-emerald-600"
                     />
                   </div>
                 </div>
@@ -916,7 +970,7 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
                         <button
                           type="button"
                           onClick={() => setSelectedAreaFilter('ALL')}
-                          className={`px-2.5 py-1 rounded-lg text-[11px] font-bold border transition ${
+                          className={`px-2.5 py-1 rounded-lg text-xs font-bold border transition ${
                             selectedAreaFilter === 'ALL'
                               ? 'bg-emerald-700 text-white border-emerald-700'
                               : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50'
@@ -935,7 +989,7 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
                               );
                               if (firstInArea) setSelectedTopicId(firstInArea.topic.id);
                             }}
-                            className={`px-2.5 py-1 rounded-lg text-[11px] font-bold border transition ${
+                            className={`px-2.5 py-1 rounded-lg text-xs font-bold border transition ${
                               selectedAreaFilter === area
                                 ? 'bg-emerald-700 text-white border-emerald-700'
                                 : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50'
@@ -955,7 +1009,7 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
                     </label>
 
                     {filteredTopics.length === 0 ? (
-                      <p className="text-xs text-slate-500 p-4 bg-slate-50 rounded-xl">
+                      <p className="text-sm text-slate-500 p-4 bg-slate-50 rounded-xl">
                         No topics found for this filter. Click "+ Enter Other Area / Topic" above to type what you studied.
                       </p>
                     ) : (
@@ -963,7 +1017,7 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
                         {activeTimetableWeek &&
                           filteredTopics.some((t) => t.source === 'timetable') && (
                             <div className="space-y-2">
-                              <div className="text-[11px] font-extrabold uppercase tracking-wider text-blue-800 bg-blue-50 border border-blue-200 px-3 py-1.5 rounded-lg">
+                              <div className="text-xs font-extrabold uppercase tracking-wider text-blue-800 bg-blue-50 border border-blue-200 px-3 py-1.5 rounded-lg">
                                 Scheduled Timetable ({activeTimetableWeek.weekLabel})
                               </div>
                               {filteredTopics
@@ -982,13 +1036,13 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
                                     >
                                       <div className="flex items-start justify-between">
                                         <div>
-                                          <span className="text-[10px] font-bold uppercase tracking-wider text-blue-800 bg-blue-100/80 px-2 py-0.5 rounded-md">
+                                          <span className="text-xs font-bold uppercase tracking-wider text-blue-800 bg-blue-100/80 px-2 py-0.5 rounded-md">
                                             {item.scheduleLabel} • {item.learningArea.title}
                                           </span>
-                                          <h4 className="font-bold text-slate-900 text-sm mt-1">
+                                          <h4 className="font-bold text-slate-900 text-base mt-1">
                                             {item.topic.title}
                                           </h4>
-                                          <p className="text-xs text-slate-600 mt-1">
+                                          <p className="text-sm text-slate-600 mt-1">
                                             {item.topic.description}
                                           </p>
                                         </div>
@@ -1009,7 +1063,7 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
                         {filteredTopics.some((t) => t.source === 'curriculum') && (
                           <div className="space-y-2">
                             {activeTimetableWeek && (
-                              <div className="text-[11px] font-extrabold uppercase tracking-wider text-slate-600 bg-slate-100 px-3 py-1.5 rounded-lg">
+                              <div className="text-xs font-extrabold uppercase tracking-wider text-slate-600 bg-slate-100 px-3 py-1.5 rounded-lg">
                                 Assigned Curriculum Topics
                               </div>
                             )}
@@ -1029,13 +1083,13 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
                                   >
                                     <div className="flex items-start justify-between">
                                       <div>
-                                        <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-800 bg-emerald-100/80 px-2 py-0.5 rounded-md">
+                                        <span className="text-xs font-bold uppercase tracking-wider text-emerald-800 bg-emerald-100/80 px-2 py-0.5 rounded-md">
                                           {item.learningArea.title} • {item.module.title}
                                         </span>
-                                        <h4 className="font-bold text-slate-900 text-sm mt-1">
+                                        <h4 className="font-bold text-slate-900 text-base mt-1">
                                           {item.topic.title}
                                         </h4>
-                                        <p className="text-xs text-slate-600 mt-1">
+                                        <p className="text-sm text-slate-600 mt-1">
                                           {item.topic.description}
                                         </p>
                                       </div>
@@ -1073,10 +1127,10 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
           {step === 3 && didStudy && (
             <div className="space-y-4">
               <div className="text-center">
-                <h4 className="text-sm font-extrabold text-slate-900">
+                <h4 className="text-base font-extrabold text-slate-900">
                   How well did you understand the lesson on {selectedDate}?
                 </h4>
-                <p className="text-xs text-slate-500 mt-0.5">
+                <p className="text-sm text-slate-500 mt-0.5">
                   Area: <strong className="text-emerald-800">{resolvedAreaTitle}</strong> • Topic:{' '}
                   <strong className="text-slate-800">{resolvedTopicTitle || 'Selected lesson'}</strong>
                 </p>
@@ -1098,10 +1152,10 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
                     </div>
                     <div>
                       <span className="font-black text-emerald-900 text-base block">EXCELLENT</span>
-                      <span className="text-[11px] font-bold text-emerald-700">Level 1</span>
+                      <span className="text-xs font-bold text-emerald-700">Level 1</span>
                     </div>
                   </div>
-                  <p className="text-xs text-slate-700 font-medium">
+                  <p className="text-sm text-slate-700 font-medium">
                     I understand very well and can teach someone else or do the practical work easily.
                   </p>
                 </button>
@@ -1121,10 +1175,10 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
                     </div>
                     <div>
                       <span className="font-black text-blue-900 text-base block">GOOD</span>
-                      <span className="text-[11px] font-bold text-blue-700">Level 2</span>
+                      <span className="text-xs font-bold text-blue-700">Level 2</span>
                     </div>
                   </div>
-                  <p className="text-xs text-slate-700 font-medium">
+                  <p className="text-sm text-slate-700 font-medium">
                     I understand the main ideas and can follow the class exercises.
                   </p>
                 </button>
@@ -1144,10 +1198,10 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
                     </div>
                     <div>
                       <span className="font-black text-amber-900 text-base block">FAIR</span>
-                      <span className="text-[11px] font-bold text-amber-700">Level 3</span>
+                      <span className="text-xs font-bold text-amber-700">Level 3</span>
                     </div>
                   </div>
-                  <p className="text-xs text-slate-700 font-medium">
+                  <p className="text-sm text-slate-700 font-medium">
                     I need more practice. Some concepts were a bit confusing for me.
                   </p>
                 </button>
@@ -1167,12 +1221,12 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
                     </div>
                     <div>
                       <span className="font-black text-rose-900 text-base block">NEEDS SUPPORT</span>
-                      <span className="text-[11px] font-bold text-rose-700">
+                      <span className="text-xs font-bold text-rose-700">
                         Level 4 (Teacher Alert)
                       </span>
                     </div>
                   </div>
-                  <p className="text-xs text-slate-700 font-medium">
+                  <p className="text-sm text-slate-700 font-medium">
                     I need the teacher’s help and 1-on-1 explanation to understand this topic.
                   </p>
                 </button>
@@ -1184,7 +1238,7 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
           {step === 4 && (
             <div className="space-y-4">
               {!allowReflections ? (
-                <div className="bg-amber-50 border border-amber-200 p-4 rounded-xl text-xs text-amber-900">
+                <div className="bg-amber-50 border border-amber-200 p-4 rounded-xl text-sm text-amber-900">
                   <p className="font-bold">Daily Reflections Disabled by School Policy</p>
                   <p className="mt-1 text-amber-800">
                     Your school administrator has disabled learner reflection prompts. Click Continue to review and submit your register.
@@ -1192,7 +1246,7 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
                 </div>
               ) : (
                 <>
-                  <div className="bg-slate-50 border border-slate-200 p-3 rounded-xl text-xs text-slate-700">
+                  <div className="bg-slate-50 border border-slate-200 p-3 rounded-xl text-sm text-slate-700">
                     <span className="font-bold text-slate-900">
                       {didStudy ? 'Personal Reflection: ' : 'Session Note (Optional): '}
                     </span>
@@ -1202,7 +1256,7 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
                   </div>
 
                   <div>
-                    <label className="block text-xs font-bold text-slate-700 mb-1">
+                    <label className="block text-sm font-bold text-slate-700 mb-1">
                       {didStudy
                         ? '1. What did you learn?'
                         : '1. Any details on what happened while at school?'}
@@ -1216,14 +1270,14 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
                       }
                       value={reflectionLearned}
                       onChange={(e) => setReflectionLearned(e.target.value)}
-                      className="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-xs focus:ring-2 focus:ring-emerald-600 outline-none"
+                      className="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-sm focus:ring-2 focus:ring-emerald-600 outline-none"
                     />
                   </div>
 
                   {didStudy && (
                     <>
                       <div>
-                        <label className="block text-xs font-bold text-slate-700 mb-1">
+                        <label className="block text-sm font-bold text-slate-700 mb-1">
                           2. What activity did you complete?
                         </label>
                         <textarea
@@ -1231,12 +1285,12 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
                           placeholder="e.g., Created my responsive holiday portfolio page..."
                           value={reflectionActivity}
                           onChange={(e) => setReflectionActivity(e.target.value)}
-                          className="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-xs focus:ring-2 focus:ring-emerald-600 outline-none"
+                          className="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-sm focus:ring-2 focus:ring-emerald-600 outline-none"
                         />
                       </div>
 
                       <div>
-                        <label className="block text-xs font-bold text-slate-700 mb-1">
+                        <label className="block text-sm font-bold text-slate-700 mb-1">
                           3. What was difficult?
                         </label>
                         <textarea
@@ -1244,12 +1298,12 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
                           placeholder="e.g., Positioning cards cleanly on small screens..."
                           value={reflectionDifficult}
                           onChange={(e) => setReflectionDifficult(e.target.value)}
-                          className="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-xs focus:ring-2 focus:ring-emerald-600 outline-none"
+                          className="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-sm focus:ring-2 focus:ring-emerald-600 outline-none"
                         />
                       </div>
 
                       <div>
-                        <label className="block text-xs font-bold text-slate-700 mb-1">
+                        <label className="block text-sm font-bold text-slate-700 mb-1">
                           4. What would you like the teacher to explain again?
                         </label>
                         <textarea
@@ -1257,7 +1311,7 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
                           placeholder="e.g., Please demonstrate media queries once more..."
                           value={reflectionTeacherExplain}
                           onChange={(e) => setReflectionTeacherExplain(e.target.value)}
-                          className="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-xs focus:ring-2 focus:ring-emerald-600 outline-none"
+                          className="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-sm focus:ring-2 focus:ring-emerald-600 outline-none"
                         />
                       </div>
                     </>
@@ -1272,19 +1326,19 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
             <div className="space-y-4">
               <div className="bg-emerald-50 border border-emerald-200 p-4 rounded-xl text-center">
                 <Sparkles className="w-8 h-8 text-emerald-600 mx-auto mb-1" />
-                <h4 className="font-extrabold text-slate-900 text-sm">
+                <h4 className="font-extrabold text-slate-900 text-base">
                   {existingForSelectedDate && !isToday
                     ? `Confirm Previous Day Update (${selectedDate})`
                     : `Review Your Register (${selectedDate})`}
                 </h4>
-                <p className="text-xs text-emerald-800">
+                <p className="text-sm text-emerald-800">
                   {isToday
                     ? 'Please verify before final submission. Only one entry is allowed per day.'
                     : 'This record will be saved under the selected previous date with full audit logging.'}
                 </p>
               </div>
 
-              <div className="bg-white border border-slate-200 rounded-xl divide-y divide-slate-100 text-xs">
+              <div className="bg-white border border-slate-200 rounded-xl divide-y divide-slate-100 text-sm">
                 <div className="p-3 flex justify-between items-center">
                   <span className="text-slate-500 font-medium">Register Date:</span>
                   <span className="font-bold text-slate-900">{selectedDate} (EAT)</span>
@@ -1297,14 +1351,15 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
                 </div>
                 <div className="p-3 flex justify-between items-center">
                   <span className="text-slate-500 font-medium">Class / Cohort:</span>
-                  <span className="font-bold text-slate-900">
+                  <span className="font-bold text-slate-900 text-right">
                     {cohort.name} ({cohort.code})
+                    {cohortClass ? ` • ${cohortLevel?.name || cohortClass.levelName} → ${cohortClass.name}` : ''}
                   </span>
                 </div>
                 <div className="p-3 flex justify-between items-center">
                   <span className="text-slate-500 font-medium">Attendance & Study:</span>
                   <span
-                    className={`font-black uppercase px-2 py-0.5 rounded-full ${
+                    className={`font-black uppercase px-2.5 py-0.5 rounded-full text-xs ${
                       !didStudy
                         ? 'bg-amber-100 text-amber-900'
                         : status === 'present'
@@ -1325,7 +1380,7 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
                   <>
                     <div className="p-3 flex justify-between items-center">
                       <span className="text-slate-500 font-medium flex items-center space-x-1">
-                        <BookOpen className="w-3.5 h-3.5 text-emerald-700" />
+                        <BookOpen className="w-4 h-4 text-emerald-700" />
                         <span>Area Learned:</span>
                       </span>
                       <span className="font-bold text-emerald-900">{resolvedAreaTitle}</span>
@@ -1336,7 +1391,7 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
                     </div>
                     <div className="p-3 flex justify-between items-center">
                       <span className="text-slate-500 font-medium">Understanding Level:</span>
-                      <span className="font-black uppercase text-blue-800 bg-blue-100 px-2 py-0.5 rounded-full">
+                      <span className="font-black uppercase text-xs text-blue-800 bg-blue-100 px-2.5 py-0.5 rounded-full">
                         {understandingLevel.replace('_', ' ')}
                       </span>
                     </div>
@@ -1360,16 +1415,16 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
             <button
               type="button"
               onClick={handlePrevStep}
-              className="py-2 px-3.5 bg-white border border-slate-300 hover:bg-slate-100 text-slate-700 font-bold rounded-xl text-xs flex items-center space-x-1.5 transition"
+              className="py-2 px-3.5 bg-white border border-slate-300 hover:bg-slate-100 text-slate-700 font-bold rounded-xl text-sm flex items-center space-x-1.5 transition"
             >
-              <ArrowLeft className="w-3.5 h-3.5" />
+              <ArrowLeft className="w-4 h-4" />
               <span>Back</span>
             </button>
           ) : (
             <button
               type="button"
               onClick={onClose}
-              className="py-2 px-3.5 text-slate-500 hover:text-slate-700 text-xs font-semibold"
+              className="py-2 px-3.5 text-slate-500 hover:text-slate-700 text-sm font-semibold"
             >
               Cancel
             </button>
@@ -1379,17 +1434,17 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
             <button
               type="button"
               onClick={handleNextStep}
-              className="py-2.5 px-5 bg-emerald-700 hover:bg-emerald-800 text-white font-bold rounded-xl text-xs flex items-center space-x-1.5 transition shadow-xs"
+              className="py-2.5 px-5 bg-emerald-700 hover:bg-emerald-800 text-white font-bold rounded-xl text-sm flex items-center space-x-1.5 transition shadow-xs"
             >
               <span>{step === 1 && !didStudy ? 'Continue to Review' : 'Continue'}</span>
-              <ArrowRight className="w-3.5 h-3.5" />
+              <ArrowRight className="w-4 h-4" />
             </button>
           ) : (
             <button
               type="button"
               disabled={submitting}
               onClick={handleSubmit}
-              className="py-2.5 px-6 bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 text-white font-bold rounded-xl text-xs flex items-center space-x-1.5 transition shadow-md"
+              className="py-2.5 px-6 bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 text-white font-bold rounded-xl text-sm flex items-center space-x-1.5 transition shadow-md"
             >
               <span>
                 {submitting

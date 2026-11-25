@@ -22,7 +22,7 @@ export const DigitalIdCardModal: React.FC<DigitalIdCardModalProps> = ({
       <div className="bg-white rounded-2xl max-w-md w-full shadow-2xl border border-slate-200 overflow-hidden">
         {/* Modal Top Controls */}
         <div className="px-5 py-3.5 bg-slate-50 border-b border-slate-200 flex items-center justify-between">
-          <div className="flex items-center space-x-2 text-xs font-extrabold text-slate-800 uppercase tracking-wider">
+          <div className="flex items-center space-x-2 text-sm font-extrabold text-slate-800 uppercase tracking-wider">
             <ShieldCheck className="w-4 h-4 text-emerald-700" />
             <span>Official Digital Learner ID Card</span>
           </div>
@@ -43,13 +43,13 @@ export const DigitalIdCardModal: React.FC<DigitalIdCardModalProps> = ({
             <div className="bg-white border-b-2 border-emerald-700 px-4 py-3 flex items-center space-x-3">
               <SchoolLogo className="w-14 h-14 shrink-0" />
               <div className="min-w-0">
-                <h3 className="text-xs font-black text-slate-900 tracking-tight leading-tight">
+                <h3 className="text-sm font-black text-slate-900 tracking-tight leading-tight">
                   SANGURUR COMPREHENSIVE SCHOOL
                 </h3>
-                <p className="text-[10px] font-bold text-emerald-700 uppercase tracking-wider">
+                <p className="text-xs font-bold text-emerald-700 uppercase tracking-wider">
                   Motto: Think, Code, Change the World
                 </p>
-                <p className="text-[10px] text-slate-500 font-medium">
+                <p className="text-xs text-slate-500 font-medium">
                   Sangurur Digital Learner Register (SDLR)
                 </p>
               </div>
@@ -59,45 +59,45 @@ export const DigitalIdCardModal: React.FC<DigitalIdCardModalProps> = ({
             <div className="p-4 space-y-3">
               <div className="flex items-start justify-between gap-2">
                 <div>
-                  <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider block">
+                  <span className="text-xs uppercase font-bold text-slate-400 tracking-wider block">
                     Learner Full Name
                   </span>
-                  <p className="text-base font-black text-slate-900 leading-snug">
+                  <p className="text-lg font-black text-slate-900 leading-snug">
                     {learner.fullName}
                   </p>
                 </div>
-                <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 font-bold text-[10px] inline-flex items-center space-x-1 shrink-0">
-                  <CheckCircle className="w-3 h-3" />
+                <span className="px-2.5 py-0.5 rounded-full bg-emerald-100 text-emerald-800 font-bold text-xs inline-flex items-center space-x-1 shrink-0">
+                  <CheckCircle className="w-3.5 h-3.5" />
                   <span>{learner.status || 'ACTIVE'}</span>
                 </span>
               </div>
 
               <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 flex items-center justify-between">
                 <div>
-                  <span className="text-[10px] uppercase font-bold text-blue-800 tracking-wider block">
+                  <span className="text-xs uppercase font-bold text-blue-800 tracking-wider block">
                     Official Digital ID (Username)
                   </span>
-                  <span className="font-mono font-black text-sm text-slate-900">
+                  <span className="font-mono font-black text-base text-slate-900">
                     {digitalId}
                   </span>
                 </div>
                 <div className="text-right">
-                  <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider block">
+                  <span className="text-xs uppercase font-bold text-slate-400 tracking-wider block">
                     Role
                   </span>
-                  <span className="text-xs font-bold text-emerald-800">LEARNER</span>
+                  <span className="text-sm font-bold text-emerald-800">LEARNER</span>
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-3 text-xs pt-1">
+              <div className="grid grid-cols-2 gap-3 text-sm pt-1">
                 <div>
-                  <span className="text-[10px] uppercase font-bold text-slate-400 block">
+                  <span className="text-xs uppercase font-bold text-slate-400 block">
                     Assigned Cohort
                   </span>
                   <span className="font-bold text-slate-800">{cohortName}</span>
                 </div>
                 <div>
-                  <span className="text-[10px] uppercase font-bold text-slate-400 block">
+                  <span className="text-xs uppercase font-bold text-slate-400 block">
                     Gender / Age
                   </span>
                   <span className="font-semibold text-slate-700 capitalize">
@@ -108,7 +108,7 @@ export const DigitalIdCardModal: React.FC<DigitalIdCardModalProps> = ({
             </div>
 
             {/* Bottom Accent Strip */}
-            <div className="bg-emerald-800 text-white px-4 py-1.5 flex items-center justify-between text-[10px] font-semibold">
+            <div className="bg-emerald-800 text-white px-4 py-1.5 flex items-center justify-between text-xs font-semibold">
               <span>OFFICIAL STUDENT CREDENTIAL</span>
               <span>EAT (Africa/Nairobi)</span>
             </div>
@@ -120,16 +120,16 @@ export const DigitalIdCardModal: React.FC<DigitalIdCardModalProps> = ({
           <button
             type="button"
             onClick={onClose}
-            className="py-2 px-4 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-xl transition"
+            className="py-2 px-4 text-sm font-semibold text-slate-600 hover:bg-slate-100 rounded-xl transition"
           >
             Close
           </button>
           <button
             type="button"
             onClick={() => generateDigitalIdCardPDF(learner, cohortName)}
-            className="py-2 px-4 bg-blue-700 hover:bg-blue-800 text-white font-bold rounded-xl text-xs flex items-center space-x-1.5 shadow-sm transition"
+            className="py-2 px-4 bg-blue-700 hover:bg-blue-800 text-white font-bold rounded-xl text-sm flex items-center space-x-1.5 shadow-sm transition"
           >
-            <Printer className="w-3.5 h-3.5 text-amber-300" />
+            <Printer className="w-4 h-4 text-amber-300" />
             <span>Download ID Card (PDF)</span>
           </button>
         </div>

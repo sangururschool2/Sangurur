@@ -1,6 +1,9 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import {
   Cohort,
+  CohortLevel,
+  CohortClass,
+  Learner,
   DailyRegister,
   WeeklyTimetableEntry,
   TimetableTopicSlot,
@@ -13,6 +16,7 @@ import {
   deleteWeeklyTimetableEntry,
   seedNovDecHolidayTimetable,
   getNairobiTodayYmd,
+  isUpperJuniorSeniorTrack,
 } from '../../services/dataService';
 import { generateWeeklyTimetablePDF } from '../../services/pdfReportGenerator';
 import { exportWeeklyTimetableToExcel } from '../../services/excelService';
@@ -33,12 +37,19 @@ import {
   AlertTriangle,
   Layers,
   Calendar,
+  GraduationCap,
+  RefreshCw,
 } from 'lucide-react';
 
 interface WeeklyTimetableViewProps {
   cohorts: Cohort[];
+  cohortLevels?: CohortLevel[];
+  cohortClasses?: CohortClass[];
+  learners?: Learner[];
   currentTeacherName: string;
   fixedCohortId?: string;
+  fixedLevel?: CohortLevel;
+  fixedClass?: CohortClass;
   embedded?: boolean;
   registers?: DailyRegister[];
 }
@@ -63,14 +74,20 @@ const PROGRAMME_TERMS = [
 
 export const WeeklyTimetableView: React.FC<WeeklyTimetableViewProps> = ({
   cohorts,
+  cohortLevels = [],
+  cohortClasses = [],
+  learners = [],
   currentTeacherName,
   fixedCohortId,
+  fixedLevel,
+  fixedClass,
   embedded = false,
   registers = [],
 }) => {
   const [selectedCohortId, setSelectedCohortId] = useState<string>(
     fixedCohortId || cohorts[0]?.id || ''
   );
+  const [selectedClassId, setSelectedClassId] = useState<string>(fixedClass?.id || 'AUTO');
   const [termFilter, setTermFilter] = useState<string>('ALL');
   const [entries, setEntries] = useState<WeeklyTimetableEntry[]>([]);
   const [loading, setLoading] = useState<boolean>(false);
@@ -114,13 +131,57 @@ export const WeeklyTimetableView: React.FC<WeeklyTimetableViewProps> = ({
     [cohorts, selectedCohortId]
   );
 
-  // Flatten cohort curriculum topics for quick insertion
+  const levelsForCohort = useMemo(
+    () => cohortLevels.filter((l) => l.cohortId === selectedCohort?.id),
+    [cohortLevels, selectedCohort?.id]
+  );
+
+  const classesForCohort = useMemo(
+    () => cohortClasses.filter((c) => c.cohortId === selectedCohort?.id),
+    [cohortClasses, selectedCohort?.id]
+  );
+
+  useEffect(() => {
+    if (fixedClass) {
+      setSelectedClassId(fixedClass.id);
+      return;
+    }
+    if (selectedClassId === 'COHORT_WIDE') {
+      return;
+    }
+    if (classesForCohort.length > 0) {
+      if (!classesForCohort.some((c) => c.id === selectedClassId)) {
+        setSelectedClassId(classesForCohort[0].id);
+      }
+    } else {
+      setSelectedClassId('COHORT_WIDE');
+    }
+  }, [fixedClass, classesForCohort, selectedCohort?.id]);
+
+  const activeClass: CohortClass | undefined = useMemo(() => {
+    if (fixedClass) return fixedClass;
+    if (selectedClassId === 'COHORT_WIDE' || selectedClassId === 'AUTO') return undefined;
+    return classesForCohort.find((c) => c.id === selectedClassId);
+  }, [fixedClass, selectedClassId, classesForCohort]);
+
+  const activeLevel: CohortLevel | undefined = useMemo(() => {
+    if (fixedLevel) return fixedLevel;
+    if (!activeClass) return undefined;
+    return levelsForCohort.find((l) => l.id === activeClass.levelId);
+  }, [fixedLevel, activeClass, levelsForCohort]);
+
+  // Flatten class/cohort curriculum topics & courses offered for quick insertion
   const cohortCurriculumTopics = useMemo(() => {
     const list: Array<{ id: string; title: string; learningArea: string; activity: string }> = [];
-    const areas = selectedCohort?.curriculumSnapshot?.learningAreas || [];
+    const seenTitles = new Set<string>();
+    const areas =
+      activeClass?.curriculumSnapshot?.learningAreas ||
+      selectedCohort?.curriculumSnapshot?.learningAreas ||
+      [];
     areas.forEach((la) => {
       la.modules.forEach((mod) => {
         mod.topics.forEach((top) => {
+          seenTitles.add(top.title.toLowerCase());
           list.push({
             id: top.id,
             title: top.title,
@@ -130,19 +191,43 @@ export const WeeklyTimetableView: React.FC<WeeklyTimetableViewProps> = ({
         });
       });
     });
+    (activeClass?.coursesOffered || []).forEach((course) => {
+      if (!seenTitles.has(course.title.toLowerCase())) {
+        list.push({
+          id: course.id,
+          title: `${course.title} Session`,
+          learningArea: course.title,
+          activity: course.description || '',
+        });
+      }
+    });
     return list;
-  }, [selectedCohort]);
+  }, [selectedCohort, activeClass]);
 
-  const loadTimetable = async (cohort: Cohort | undefined, autoSeedIfEmpty = true) => {
+  const loadTimetable = async (
+    cohort: Cohort | undefined,
+    cls: CohortClass | undefined,
+    autoSeedIfEmpty = true
+  ) => {
     if (!cohort) return;
     setLoading(true);
     setErrorMsg(null);
     try {
-      let data = await getWeeklyTimetable(cohort.id);
-      if (data.length === 0 && autoSeedIfEmpty) {
-        data = await seedNovDecHolidayTimetable(cohort, currentTeacherName, 'Nov/Dec Holiday 2026');
+      let data = await getWeeklyTimetable(cohort.id, cls?.id);
+      if (!cls && classesForCohort.length > 0) {
+        data = data.filter((e) => !e.classId);
+      }
+      if (data.length === 0 && autoSeedIfEmpty && (cls || classesForCohort.length === 0)) {
+        data = await seedNovDecHolidayTimetable(
+          cohort,
+          currentTeacherName,
+          'Nov/Dec Holiday 2026',
+          cls
+        );
         setStatusBanner(
-          `Loaded the 6-week Nov/Dec Holiday 2026 timetable template for ${cohort.name}. You can edit any week or add custom terms below.`
+          `Loaded the 6-week Nov/Dec Holiday 2026 timetable template for ${
+            cls ? `${cohort.name} — ${cls.name}` : cohort.name
+          }. You can edit any week or add custom terms below.`
         );
       }
       setEntries(data);
@@ -154,10 +239,10 @@ export const WeeklyTimetableView: React.FC<WeeklyTimetableViewProps> = ({
   };
 
   useEffect(() => {
-    if (selectedCohort) {
-      loadTimetable(selectedCohort, true);
+    if (selectedCohort && (fixedClass || selectedClassId !== 'AUTO')) {
+      loadTimetable(selectedCohort, activeClass, true);
     }
-  }, [selectedCohort?.id]);
+  }, [selectedCohort?.id, activeClass?.id, selectedClassId]);
 
   const availableTerms = useMemo(() => {
     const terms = new Set<string>(entries.map((e) => e.programmeTerm).filter(Boolean));
@@ -173,16 +258,35 @@ export const WeeklyTimetableView: React.FC<WeeklyTimetableViewProps> = ({
     return entries.find((e) => e.startDate <= nairobiToday && nairobiToday <= e.endDate) || null;
   }, [entries, nairobiToday]);
 
-  // Compute distinct topics actually logged/taught during each week's date range for this cohort
+  // Compute distinct topics actually logged/taught during each week's date range for this cohort/class
   const taughtByWeekMap = useMemo(() => {
     const map: Record<
       string,
       Array<{ topicTitle: string; learningArea: string; learnersCount: number; lastDate: string }>
     > = {};
     if (!selectedCohort) return map;
-    const cohortRegs = registers.filter(
-      (r) => r.cohortId === selectedCohort.id && r.didStudy !== false && Boolean(r.topicTitle?.trim())
+    const learnerIdsInClass = new Set(
+      activeClass
+        ? learners
+            .filter(
+              (l) =>
+                l.classId === activeClass.id ||
+                (l.assignedClassIds || []).includes(activeClass.id)
+            )
+            .map((l) => l.id)
+        : []
     );
+
+    const cohortRegs = registers.filter((r) => {
+      if (r.cohortId !== selectedCohort.id || r.didStudy === false || !r.topicTitle?.trim()) {
+        return false;
+      }
+      if (activeClass) {
+        if (r.classId) return r.classId === activeClass.id;
+        return learnerIdsInClass.has(r.learnerDocId);
+      }
+      return true;
+    });
     entries.forEach((entry) => {
       const grouped = new Map<
         string,
@@ -212,9 +316,9 @@ export const WeeklyTimetableView: React.FC<WeeklyTimetableViewProps> = ({
       }));
     });
     return map;
-  }, [entries, registers, selectedCohort]);
+  }, [entries, registers, selectedCohort, activeClass, learners]);
 
-  const handleLoadNovDecTemplate = async () => {
+  const handleLoadNovDecTemplate = async (replaceExisting = false) => {
     if (!selectedCohort) return;
     setSeeding(true);
     setErrorMsg(null);
@@ -222,12 +326,16 @@ export const WeeklyTimetableView: React.FC<WeeklyTimetableViewProps> = ({
       const updated = await seedNovDecHolidayTimetable(
         selectedCohort,
         currentTeacherName,
-        'Nov/Dec Holiday 2026'
+        'Nov/Dec Holiday 2026',
+        activeClass,
+        { replaceExisting }
       );
       setEntries(updated);
       setTermFilter('Nov/Dec Holiday 2026');
       setStatusBanner(
-        `Nov/Dec Holiday 2026 weekly schedule synchronized for ${selectedCohort.name} (Weeks 1–6).`
+        `${replaceExisting ? 'Replaced & synchronized' : 'Synchronized'} Nov/Dec Holiday 2026 weekly schedule for ${
+          activeClass ? `${selectedCohort.name} — ${activeClass.name}` : selectedCohort.name
+        } (Weeks 1–6).`
       );
     } catch (err: any) {
       setErrorMsg(err?.message || 'Failed to seed Nov/Dec Holiday timetable.');
@@ -350,6 +458,14 @@ export const WeeklyTimetableView: React.FC<WeeklyTimetableViewProps> = ({
       const payload = {
         cohortId: selectedCohort.id,
         cohortCode: selectedCohort.code,
+        ...(activeClass
+          ? {
+              levelId: activeLevel?.id || activeClass.levelId,
+              levelName: activeLevel?.name || activeClass.levelName,
+              classId: activeClass.id,
+              className: activeClass.name,
+            }
+          : {}),
         programmeTerm: effectiveTerm.slice(0, 128),
         weekNumber: Number(formWeekNumber) || 1,
         weekLabel: formWeekLabel.trim().slice(0, 128) || `Week ${formWeekNumber}`,
@@ -368,7 +484,7 @@ export const WeeklyTimetableView: React.FC<WeeklyTimetableViewProps> = ({
         setStatusBanner(`Added ${payload.weekLabel} to ${payload.programmeTerm}.`);
       }
       setShowWeekModal(false);
-      await loadTimetable(selectedCohort, false);
+      await loadTimetable(selectedCohort, activeClass, false);
     } catch (err: any) {
       setErrorMsg(err?.message || 'Could not save weekly timetable.');
     } finally {
@@ -383,7 +499,7 @@ export const WeeklyTimetableView: React.FC<WeeklyTimetableViewProps> = ({
       await deleteWeeklyTimetableEntry(entryToDelete.id);
       setStatusBanner(`Deleted ${entryToDelete.weekLabel}.`);
       setEntryToDelete(null);
-      await loadTimetable(selectedCohort, false);
+      await loadTimetable(selectedCohort, activeClass, false);
     } catch (err: any) {
       setErrorMsg(err?.message || 'Failed to delete week entry.');
     } finally {
@@ -393,13 +509,15 @@ export const WeeklyTimetableView: React.FC<WeeklyTimetableViewProps> = ({
 
   const handleExportPDF = async () => {
     if (!selectedCohort) return;
-    const label = termFilter === 'ALL' ? 'All Scheduled Terms' : termFilter;
+    const baseLabel = termFilter === 'ALL' ? 'All Scheduled Terms' : termFilter;
+    const label = activeClass ? `${baseLabel} — ${activeClass.name}` : baseLabel;
     await generateWeeklyTimetablePDF(filteredEntries, selectedCohort, label);
   };
 
   const handleExportExcel = async () => {
     if (!selectedCohort) return;
-    const label = termFilter === 'ALL' ? 'All Scheduled Terms' : termFilter;
+    const baseLabel = termFilter === 'ALL' ? 'All Scheduled Terms' : termFilter;
+    const label = activeClass ? `${baseLabel} — ${activeClass.name}` : baseLabel;
     await exportWeeklyTimetableToExcel(filteredEntries, selectedCohort, label);
   };
 
@@ -411,34 +529,51 @@ export const WeeklyTimetableView: React.FC<WeeklyTimetableViewProps> = ({
           <h2 className={`${embedded ? 'text-base' : 'text-xl'} font-extrabold text-slate-900 tracking-tight flex items-center space-x-2`}>
             <CalendarDays className={`${embedded ? 'w-5 h-5' : 'w-6 h-6'} text-emerald-700`} />
             <span>
-              {embedded && selectedCohort
+              {activeClass
+                ? `Class Timetable & What Is Taught — ${activeClass.name}`
+                : embedded && selectedCohort
                 ? `Weekly Timetable & What Is Taught — ${selectedCohort.name}`
                 : 'Weekly Programme Timetable'}
             </span>
           </h2>
-          <p className="text-xs text-slate-500 mt-0.5">
-            Organize weekly schedules such as the Nov/Dec Holiday Bootcamp with distinct topics every week and view what has been taught during each week.
+          <p className="text-sm text-slate-500 mt-0.5">
+            {activeClass
+              ? `Level: ${activeLevel?.name || activeClass.levelName} • Scheduled lessons and logged teaching topics specifically for ${activeClass.name}.`
+              : 'Organize weekly schedules per cohort, level, and class with distinct topics every week and view what has been taught.'}
           </p>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
-            onClick={handleLoadNovDecTemplate}
+            onClick={() => handleLoadNovDecTemplate(false)}
             disabled={seeding || !selectedCohort}
-            className="py-2 px-3.5 bg-blue-50 hover:bg-blue-100 text-blue-800 border border-blue-200 font-bold rounded-xl text-xs flex items-center space-x-1.5 transition disabled:opacity-50"
+            className="py-2 px-3.5 bg-blue-50 hover:bg-blue-100 text-blue-800 border border-blue-200 font-bold rounded-xl text-sm flex items-center space-x-1.5 transition disabled:opacity-50"
           >
-            <Sparkles className="w-3.5 h-3.5 text-blue-600" />
+            <Sparkles className="w-4 h-4 text-blue-600" />
             <span>{seeding ? 'Syncing...' : 'Load Nov/Dec Holiday Weekly Template'}</span>
           </button>
+
+          {entries.length > 0 && isUpperJuniorSeniorTrack(activeClass, selectedCohort) && (
+            <button
+              type="button"
+              onClick={() => handleLoadNovDecTemplate(true)}
+              disabled={seeding || !selectedCohort}
+              title="Replace existing Nov/Dec Holiday 2026 weeks with the 6-week Office/Azure, AI/C, C++/Arduino, DBMS, Python/Java/JS, and Libraries/Projects schedule"
+              className="py-2 px-3.5 bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 font-bold rounded-xl text-sm flex items-center space-x-1.5 transition disabled:opacity-50"
+            >
+              <RefreshCw className={`w-4 h-4 text-amber-700 ${seeding ? 'animate-spin' : ''}`} />
+              <span>{seeding ? 'Updating...' : 'Apply Official 6-Week Schedule'}</span>
+            </button>
+          )}
 
           <button
             type="button"
             onClick={handleExportPDF}
             disabled={filteredEntries.length === 0 || !selectedCohort}
-            className="py-2 px-3.5 bg-white hover:bg-slate-50 text-slate-700 border border-slate-300 font-bold rounded-xl text-xs flex items-center space-x-1.5 transition disabled:opacity-50"
+            className="py-2 px-3.5 bg-white hover:bg-slate-50 text-slate-700 border border-slate-300 font-bold rounded-xl text-sm flex items-center space-x-1.5 transition disabled:opacity-50"
           >
-            <FileDown className="w-3.5 h-3.5 text-rose-600" />
+            <FileDown className="w-4 h-4 text-rose-600" />
             <span>Export PDF</span>
           </button>
 
@@ -446,9 +581,9 @@ export const WeeklyTimetableView: React.FC<WeeklyTimetableViewProps> = ({
             type="button"
             onClick={handleExportExcel}
             disabled={filteredEntries.length === 0 || !selectedCohort}
-            className="py-2 px-3.5 bg-white hover:bg-slate-50 text-slate-700 border border-slate-300 font-bold rounded-xl text-xs flex items-center space-x-1.5 transition disabled:opacity-50"
+            className="py-2 px-3.5 bg-white hover:bg-slate-50 text-slate-700 border border-slate-300 font-bold rounded-xl text-sm flex items-center space-x-1.5 transition disabled:opacity-50"
           >
-            <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-700" />
+            <FileSpreadsheet className="w-4 h-4 text-emerald-700" />
             <span>Export Excel</span>
           </button>
 
@@ -456,7 +591,7 @@ export const WeeklyTimetableView: React.FC<WeeklyTimetableViewProps> = ({
             type="button"
             onClick={openAddWeekModal}
             disabled={!selectedCohort}
-            className="py-2 px-4 bg-emerald-700 hover:bg-emerald-800 text-white font-bold rounded-xl text-xs flex items-center space-x-1.5 shadow-xs transition disabled:opacity-50"
+            className="py-2 px-4 bg-emerald-700 hover:bg-emerald-800 text-white font-bold rounded-xl text-sm flex items-center space-x-1.5 shadow-xs transition disabled:opacity-50"
           >
             <Plus className="w-4 h-4" />
             <span>Add Week</span>
@@ -465,16 +600,29 @@ export const WeeklyTimetableView: React.FC<WeeklyTimetableViewProps> = ({
       </div>
 
       {/* Filters Bar */}
-      <div className={`bg-white rounded-2xl border border-slate-200 p-4 shadow-xs grid grid-cols-1 ${embedded ? 'md:grid-cols-2' : 'md:grid-cols-3'} gap-4 items-end`}>
+      <div
+        className={`bg-white rounded-2xl border border-slate-200 p-4 shadow-xs grid grid-cols-1 ${
+          embedded
+            ? fixedClass || classesForCohort.length === 0
+              ? 'md:grid-cols-2'
+              : 'md:grid-cols-3'
+            : classesForCohort.length > 0
+            ? 'md:grid-cols-4'
+            : 'md:grid-cols-3'
+        } gap-4 items-end`}
+      >
         {!embedded && (
           <div>
-            <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-500 mb-1">
-              Select Cohort / Class
+            <label className="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1">
+              Select Cohort
             </label>
             <select
               value={selectedCohort?.id || ''}
-              onChange={(e) => setSelectedCohortId(e.target.value)}
-              className="w-full px-3 py-2 border border-slate-300 rounded-xl text-xs font-semibold bg-white outline-none focus:ring-2 focus:ring-emerald-600"
+              onChange={(e) => {
+                setSelectedCohortId(e.target.value);
+                setSelectedClassId('AUTO');
+              }}
+              className="w-full px-3 py-2 border border-slate-300 rounded-xl text-sm font-semibold bg-white outline-none focus:ring-2 focus:ring-emerald-600"
             >
               {cohorts.map((c) => (
                 <option key={c.id} value={c.id}>
@@ -485,14 +633,50 @@ export const WeeklyTimetableView: React.FC<WeeklyTimetableViewProps> = ({
           </div>
         )}
 
+        {!fixedClass && classesForCohort.length > 0 && (
+          <div>
+            <label className="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1">
+              Level & Class
+            </label>
+            <select
+              value={activeClass?.id || 'COHORT_WIDE'}
+              onChange={(e) => setSelectedClassId(e.target.value)}
+              className="w-full px-3 py-2 border border-slate-300 rounded-xl text-sm font-semibold bg-white outline-none focus:ring-2 focus:ring-emerald-600"
+            >
+              {levelsForCohort.map((lvl) => {
+                const lvlClasses = classesForCohort.filter((c) => c.levelId === lvl.id);
+                if (lvlClasses.length === 0) return null;
+                return (
+                  <optgroup key={lvl.id} label={lvl.name}>
+                    {lvlClasses.map((cls) => (
+                      <option key={cls.id} value={cls.id}>
+                        {cls.name} ({cls.code})
+                      </option>
+                    ))}
+                  </optgroup>
+                );
+              })}
+              {classesForCohort
+                .filter((c) => !levelsForCohort.some((l) => l.id === c.levelId))
+                .map((cls) => (
+                  <option key={cls.id} value={cls.id}>
+                    {cls.levelName ? `${cls.levelName} — ` : ''}
+                    {cls.name} ({cls.code})
+                  </option>
+                ))}
+              <option value="COHORT_WIDE">Cohort-Wide / General Schedule</option>
+            </select>
+          </div>
+        )}
+
         <div>
-          <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-500 mb-1">
+          <label className="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1">
             Programme / Term Filter
           </label>
           <select
             value={termFilter}
             onChange={(e) => setTermFilter(e.target.value)}
-            className="w-full px-3 py-2 border border-slate-300 rounded-xl text-xs font-semibold bg-white outline-none focus:ring-2 focus:ring-emerald-600"
+            className="w-full px-3 py-2 border border-slate-300 rounded-xl text-sm font-semibold bg-white outline-none focus:ring-2 focus:ring-emerald-600"
           >
             <option value="ALL">All Programmes & Terms ({entries.length} Weeks)</option>
             {availableTerms.map((term) => (
@@ -503,14 +687,14 @@ export const WeeklyTimetableView: React.FC<WeeklyTimetableViewProps> = ({
           </select>
         </div>
 
-        <div className="flex items-center justify-between md:justify-end gap-3 text-xs bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2">
+        <div className="flex items-center justify-between md:justify-end gap-3 text-sm bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2">
           <div>
-            <span className="text-slate-500 block text-[10px] font-bold uppercase">Today (EAT)</span>
+            <span className="text-slate-500 block text-xs font-bold uppercase">Today (EAT)</span>
             <span className="font-extrabold text-slate-900">{nairobiToday}</span>
           </div>
           <div className="h-7 w-px bg-slate-200" />
           <div>
-            <span className="text-slate-500 block text-[10px] font-bold uppercase">Active Week</span>
+            <span className="text-slate-500 block text-xs font-bold uppercase">Active Week</span>
             <span className="font-extrabold text-emerald-700">
               {activeWeekEntry ? `Week ${activeWeekEntry.weekNumber}` : 'None matching today'}
             </span>
@@ -518,9 +702,41 @@ export const WeeklyTimetableView: React.FC<WeeklyTimetableViewProps> = ({
         </div>
       </div>
 
+      {/* Active Class Courses Offered Strip */}
+      {activeClass && (
+        <div className="bg-emerald-50/70 border border-emerald-200 rounded-2xl p-3.5 flex flex-wrap items-center justify-between gap-3 text-sm">
+          <div className="flex items-center space-x-2">
+            <GraduationCap className="w-4 h-4 text-emerald-700 shrink-0" />
+            <div>
+              <span className="font-extrabold text-emerald-950">
+                {activeLevel?.name || activeClass.levelName} → {activeClass.name} ({activeClass.code})
+              </span>
+              {activeClass.gradeBand && (
+                <span className="ml-2 text-emerald-800 font-semibold">• {activeClass.gradeBand}</span>
+              )}
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-xs font-bold text-emerald-900 mr-1">Courses Offered:</span>
+            {(activeClass.coursesOffered || []).length === 0 ? (
+              <span className="text-xs text-slate-500 italic">No courses listed yet</span>
+            ) : (
+              activeClass.coursesOffered.map((course) => (
+                <span
+                  key={course.id}
+                  className="px-2 py-0.5 rounded-md bg-white border border-emerald-200 text-emerald-900 font-bold text-xs"
+                >
+                  {course.title}
+                </span>
+              ))
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Banners */}
       {statusBanner && (
-        <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-3.5 text-xs text-emerald-900 flex items-center justify-between gap-2">
+        <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-3.5 text-sm text-emerald-900 flex items-center justify-between gap-2">
           <div className="flex items-center space-x-2">
             <CheckCircle2 className="w-4 h-4 text-emerald-700 shrink-0" />
             <span className="font-semibold">{statusBanner}</span>
@@ -536,7 +752,7 @@ export const WeeklyTimetableView: React.FC<WeeklyTimetableViewProps> = ({
       )}
 
       {errorMsg && (
-        <div className="bg-rose-50 border border-rose-200 rounded-2xl p-3.5 text-xs text-rose-900 flex items-center justify-between gap-2">
+        <div className="bg-rose-50 border border-rose-200 rounded-2xl p-3.5 text-sm text-rose-900 flex items-center justify-between gap-2">
           <div className="flex items-center space-x-2">
             <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
             <span className="font-semibold">{errorMsg}</span>
@@ -552,17 +768,17 @@ export const WeeklyTimetableView: React.FC<WeeklyTimetableViewProps> = ({
         <div className="bg-gradient-to-r from-emerald-800 via-teal-700 to-blue-800 rounded-2xl p-5 text-white shadow-sm space-y-3">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
             <div>
-              <span className="inline-flex items-center space-x-1.5 px-2.5 py-0.5 rounded-full bg-amber-400 text-slate-950 text-[10px] font-black uppercase tracking-wider">
-                <Clock className="w-3 h-3" />
+              <span className="inline-flex items-center space-x-1.5 px-2.5 py-0.5 rounded-full bg-amber-400 text-slate-950 text-xs font-black uppercase tracking-wider">
+                <Clock className="w-3.5 h-3.5" />
                 <span>ACTIVE THIS WEEK • {activeWeekEntry.programmeTerm}</span>
               </span>
               <h3 className="text-lg font-black mt-1.5">{activeWeekEntry.weekLabel}</h3>
-              <p className="text-xs text-emerald-100">
+              <p className="text-sm text-emerald-100">
                 {activeWeekEntry.startDate} to {activeWeekEntry.endDate} — {activeWeekEntry.weeklyTheme}
               </p>
             </div>
-            <div className="text-xs bg-white/10 border border-white/20 rounded-xl px-3.5 py-2 shrink-0">
-              <span className="block text-[10px] text-emerald-200 font-bold uppercase">Topics Scheduled</span>
+            <div className="text-sm bg-white/10 border border-white/20 rounded-xl px-3.5 py-2 shrink-0">
+              <span className="block text-xs text-emerald-200 font-bold uppercase">Topics Scheduled</span>
               <span className="text-base font-black">{activeWeekEntry.topics?.length || 0} Sessions</span>
             </div>
           </div>
@@ -571,14 +787,14 @@ export const WeeklyTimetableView: React.FC<WeeklyTimetableViewProps> = ({
             {(activeWeekEntry.topics || []).map((slot) => (
               <div
                 key={slot.id}
-                className="bg-white/10 backdrop-blur-xs border border-white/20 rounded-xl p-3 text-xs space-y-1"
+                className="bg-white/10 backdrop-blur-xs border border-white/20 rounded-xl p-3 text-sm space-y-1"
               >
-                <div className="flex items-center justify-between text-[10px] font-bold text-amber-300 uppercase">
+                <div className="flex items-center justify-between text-xs font-bold text-amber-300 uppercase">
                   <span>{slot.dayOfWeek}</span>
                   <span>{slot.timeSlot}</span>
                 </div>
                 <p className="font-bold text-white leading-snug">{slot.topicTitle}</p>
-                <p className="text-[11px] text-emerald-100">{slot.learningArea}</p>
+                <p className="text-xs text-emerald-100">{slot.learningArea}</p>
               </div>
             ))}
           </div>
@@ -589,27 +805,27 @@ export const WeeklyTimetableView: React.FC<WeeklyTimetableViewProps> = ({
       {loading ? (
         <div className="bg-white rounded-2xl border border-slate-200 p-12 flex flex-col items-center justify-center text-slate-500 space-y-2">
           <Loader2 className="w-7 h-7 animate-spin text-emerald-700" />
-          <span className="text-xs font-semibold">Loading weekly timetable schedules...</span>
+          <span className="text-sm font-semibold">Loading weekly timetable schedules...</span>
         </div>
       ) : filteredEntries.length === 0 ? (
         <div className="bg-white rounded-2xl border border-slate-200 p-10 text-center space-y-3">
           <Calendar className="w-10 h-10 text-slate-300 mx-auto" />
-          <h3 className="text-sm font-extrabold text-slate-800">No Weekly Timetable Entries Found</h3>
-          <p className="text-xs text-slate-500 max-w-md mx-auto">
+          <h3 className="text-base font-extrabold text-slate-800">No Weekly Timetable Entries Found</h3>
+          <p className="text-sm text-slate-500 max-w-md mx-auto">
             Load the 6-week Nov/Dec Holiday Bootcamp schedule or click "Add Week" to organize different topics week by week.
           </p>
           <div className="flex justify-center gap-2 pt-2">
             <button
               type="button"
-              onClick={handleLoadNovDecTemplate}
-              className="py-2 px-4 bg-blue-700 hover:bg-blue-800 text-white font-bold rounded-xl text-xs"
+              onClick={() => handleLoadNovDecTemplate(false)}
+              className="py-2 px-4 bg-blue-700 hover:bg-blue-800 text-white font-bold rounded-xl text-sm"
             >
               Load Nov/Dec Holiday Template
             </button>
             <button
               type="button"
               onClick={openAddWeekModal}
-              className="py-2 px-4 bg-emerald-700 hover:bg-emerald-800 text-white font-bold rounded-xl text-xs"
+              className="py-2 px-4 bg-emerald-700 hover:bg-emerald-800 text-white font-bold rounded-xl text-sm"
             >
               Create Custom Week
             </button>
@@ -630,24 +846,24 @@ export const WeeklyTimetableView: React.FC<WeeklyTimetableViewProps> = ({
                 <div className="p-4 sm:p-5 bg-slate-50 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                   <div className="space-y-1">
                     <div className="flex flex-wrap items-center gap-2">
-                      <span className="px-2.5 py-0.5 rounded-full bg-slate-900 text-white text-[11px] font-black uppercase">
+                      <span className="px-2.5 py-0.5 rounded-full bg-slate-900 text-white text-xs font-black uppercase">
                         Week {entry.weekNumber}
                       </span>
-                      <span className="px-2.5 py-0.5 rounded-full bg-blue-100 text-blue-800 text-[11px] font-bold">
+                      <span className="px-2.5 py-0.5 rounded-full bg-blue-100 text-blue-800 text-xs font-bold">
                         {entry.programmeTerm}
                       </span>
-                      <span className="px-2.5 py-0.5 rounded-full bg-slate-200 text-slate-700 text-[11px] font-semibold">
+                      <span className="px-2.5 py-0.5 rounded-full bg-slate-200 text-slate-700 text-xs font-semibold">
                         {entry.startDate} to {entry.endDate}
                       </span>
                       {isCurrentWeek && (
-                        <span className="px-2.5 py-0.5 rounded-full bg-emerald-600 text-white text-[10px] font-black uppercase tracking-wider">
+                        <span className="px-2.5 py-0.5 rounded-full bg-emerald-600 text-white text-xs font-black uppercase tracking-wider">
                           Current Active Week
                         </span>
                       )}
                     </div>
                     <h3 className="text-base font-extrabold text-slate-900">{entry.weekLabel}</h3>
                     {entry.weeklyTheme && (
-                      <p className="text-xs text-slate-600">{entry.weeklyTheme}</p>
+                      <p className="text-sm text-slate-600">{entry.weeklyTheme}</p>
                     )}
                   </div>
 
@@ -655,7 +871,7 @@ export const WeeklyTimetableView: React.FC<WeeklyTimetableViewProps> = ({
                     <button
                       type="button"
                       onClick={() => openEditWeekModal(entry)}
-                      className="py-1.5 px-3 bg-white hover:bg-slate-100 border border-slate-300 rounded-xl text-xs font-bold text-slate-700 flex items-center space-x-1 transition"
+                      className="py-1.5 px-3 bg-white hover:bg-slate-100 border border-slate-300 rounded-xl text-sm font-bold text-slate-700 flex items-center space-x-1 transition"
                     >
                       <Edit3 className="w-3.5 h-3.5 text-blue-600" />
                       <span>Edit Week</span>
@@ -663,7 +879,7 @@ export const WeeklyTimetableView: React.FC<WeeklyTimetableViewProps> = ({
                     <button
                       type="button"
                       onClick={() => setEntryToDelete(entry)}
-                      className="py-1.5 px-3 bg-white hover:bg-rose-50 border border-rose-200 rounded-xl text-xs font-bold text-rose-700 flex items-center space-x-1 transition"
+                      className="py-1.5 px-3 bg-white hover:bg-rose-50 border border-rose-200 rounded-xl text-sm font-bold text-rose-700 flex items-center space-x-1 transition"
                     >
                       <Trash2 className="w-3.5 h-3.5" />
                       <span>Delete</span>
@@ -673,9 +889,9 @@ export const WeeklyTimetableView: React.FC<WeeklyTimetableViewProps> = ({
 
                 {/* Week Topics Table */}
                 <div className="overflow-x-auto">
-                  <table className="w-full text-left border-collapse text-xs">
+                  <table className="w-full text-left border-collapse text-sm">
                     <thead>
-                      <tr className="bg-white text-slate-500 font-bold border-b border-slate-200 uppercase text-[10px] tracking-wider">
+                      <tr className="bg-white text-slate-500 font-bold border-b border-slate-200 uppercase text-xs tracking-wider">
                         <th className="py-2.5 px-4 w-28">Day</th>
                         <th className="py-2.5 px-4 w-32">Time Slot</th>
                         <th className="py-2.5 px-4">Scheduled Topic</th>
@@ -690,14 +906,14 @@ export const WeeklyTimetableView: React.FC<WeeklyTimetableViewProps> = ({
                           <td className="py-3 px-4 font-extrabold text-slate-900 whitespace-nowrap">
                             {slot.dayOfWeek}
                           </td>
-                          <td className="py-3 px-4 text-slate-600 font-mono text-[11px] whitespace-nowrap">
+                          <td className="py-3 px-4 text-slate-600 font-mono text-xs whitespace-nowrap">
                             {slot.timeSlot}
                           </td>
                           <td className="py-3 px-4 font-bold text-emerald-900">
                             {slot.topicTitle}
                           </td>
                           <td className="py-3 px-4">
-                            <span className="inline-block px-2 py-0.5 rounded-md bg-slate-100 text-slate-700 font-semibold text-[11px]">
+                            <span className="inline-block px-2 py-0.5 rounded-md bg-slate-100 text-slate-700 font-semibold text-xs">
                               {slot.learningArea || 'Computing'}
                             </span>
                           </td>
@@ -706,7 +922,7 @@ export const WeeklyTimetableView: React.FC<WeeklyTimetableViewProps> = ({
                           </td>
                           <td className="py-3 px-4 text-slate-700 font-medium whitespace-nowrap">
                             <span className="inline-flex items-center space-x-1">
-                              <User className="w-3 h-3 text-slate-400" />
+                              <User className="w-3.5 h-3.5 text-slate-400" />
                               <span>{slot.facilitator || currentTeacherName}</span>
                             </span>
                           </td>
@@ -719,18 +935,18 @@ export const WeeklyTimetableView: React.FC<WeeklyTimetableViewProps> = ({
                 {/* What Is Taught During This Week (Daily Register Summary) */}
                 <div className="px-4 py-3 bg-emerald-50/50 border-t border-slate-200 flex flex-col gap-2">
                   <div className="flex items-center justify-between">
-                    <span className="text-[11px] font-extrabold uppercase tracking-wider text-emerald-900 flex items-center space-x-1.5">
+                    <span className="text-xs font-extrabold uppercase tracking-wider text-emerald-900 flex items-center space-x-1.5">
                       <BookOpen className="w-3.5 h-3.5 text-emerald-700" />
                       <span>
                         What Was Taught During Week {entry.weekNumber} ({entry.startDate} to {entry.endDate})
                       </span>
                     </span>
-                    <span className="text-[10px] font-bold text-slate-500">
+                    <span className="text-xs font-bold text-slate-500">
                       {entry.topics?.length || 0} Planned • {(taughtByWeekMap[entry.id] || []).length} Logged in Registers
                     </span>
                   </div>
                   {(taughtByWeekMap[entry.id] || []).length === 0 ? (
-                    <p className="text-[11px] text-slate-500">
+                    <p className="text-xs text-slate-500">
                       No learner daily register topic logs recorded for this week's date window yet — the {(entry.topics || []).length} scheduled topic(s) above define this week's teaching plan.
                     </p>
                   ) : (
@@ -738,12 +954,12 @@ export const WeeklyTimetableView: React.FC<WeeklyTimetableViewProps> = ({
                       {(taughtByWeekMap[entry.id] || []).map((t, tIdx) => (
                         <span
                           key={`${entry.id}_taught_${tIdx}`}
-                          className="inline-flex items-center space-x-1.5 px-2.5 py-1 rounded-lg bg-white border border-emerald-200 text-[11px] text-slate-800 shadow-2xs"
+                          className="inline-flex items-center space-x-1.5 px-2.5 py-1 rounded-lg bg-white border border-emerald-200 text-xs text-slate-800 shadow-2xs"
                         >
-                          <CheckCircle2 className="w-3 h-3 text-emerald-600 shrink-0" />
+                          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
                           <strong className="text-emerald-900">{t.topicTitle}</strong>
                           <span className="text-slate-400">({t.learningArea})</span>
-                          <span className="px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 font-bold text-[10px]">
+                          <span className="px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 font-bold text-xs">
                             {t.learnersCount} learner{t.learnersCount === 1 ? '' : 's'}
                           </span>
                         </span>
@@ -770,6 +986,7 @@ export const WeeklyTimetableView: React.FC<WeeklyTimetableViewProps> = ({
                   </h3>
                   <p className="text-xs text-emerald-100">
                     Cohort: {selectedCohort?.name} ({selectedCohort?.code})
+                    {activeClass ? ` • Class: ${activeClass.name} (${activeLevel?.name || activeClass.levelName})` : ''}
                   </p>
                 </div>
               </div>
@@ -785,13 +1002,13 @@ export const WeeklyTimetableView: React.FC<WeeklyTimetableViewProps> = ({
             <form onSubmit={handleSaveWeek} className="p-5 sm:p-6 overflow-y-auto space-y-5 flex-1">
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
                 <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                  <label className="block text-sm font-bold text-slate-700 mb-1">
                     Programme / Holiday Term *
                   </label>
                   <select
                     value={formTerm}
                     onChange={(e) => setFormTerm(e.target.value)}
-                    className="w-full px-3 py-2 border border-slate-300 rounded-xl text-xs font-semibold outline-none focus:ring-2 focus:ring-emerald-600"
+                    className="w-full px-3 py-2 border border-slate-300 rounded-xl text-sm font-semibold outline-none focus:ring-2 focus:ring-emerald-600"
                   >
                     {PROGRAMME_TERMS.map((t) => (
                       <option key={t} value={t}>
@@ -807,13 +1024,13 @@ export const WeeklyTimetableView: React.FC<WeeklyTimetableViewProps> = ({
                       placeholder="e.g., Dec Coding Bootcamp"
                       value={formCustomTerm}
                       onChange={(e) => setFormCustomTerm(e.target.value)}
-                      className="mt-2 w-full px-3 py-2 border border-slate-300 rounded-xl text-xs outline-none focus:ring-2 focus:ring-emerald-600"
+                      className="mt-2 w-full px-3 py-2 border border-slate-300 rounded-xl text-sm outline-none focus:ring-2 focus:ring-emerald-600"
                     />
                   )}
                 </div>
 
                 <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                  <label className="block text-sm font-bold text-slate-700 mb-1">
                     Week Number *
                   </label>
                   <input
@@ -823,12 +1040,12 @@ export const WeeklyTimetableView: React.FC<WeeklyTimetableViewProps> = ({
                     required
                     value={formWeekNumber}
                     onChange={(e) => setFormWeekNumber(Number(e.target.value))}
-                    className="w-full px-3 py-2 border border-slate-300 rounded-xl text-xs font-bold outline-none focus:ring-2 focus:ring-emerald-600"
+                    className="w-full px-3 py-2 border border-slate-300 rounded-xl text-sm font-bold outline-none focus:ring-2 focus:ring-emerald-600"
                   />
                 </div>
 
                 <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                  <label className="block text-sm font-bold text-slate-700 mb-1">
                     Week Start Date *
                   </label>
                   <input
@@ -836,12 +1053,12 @@ export const WeeklyTimetableView: React.FC<WeeklyTimetableViewProps> = ({
                     required
                     value={formStartDate}
                     onChange={(e) => setFormStartDate(e.target.value)}
-                    className="w-full px-3 py-2 border border-slate-300 rounded-xl text-xs font-semibold outline-none focus:ring-2 focus:ring-emerald-600"
+                    className="w-full px-3 py-2 border border-slate-300 rounded-xl text-sm font-semibold outline-none focus:ring-2 focus:ring-emerald-600"
                   />
                 </div>
 
                 <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                  <label className="block text-sm font-bold text-slate-700 mb-1">
                     Week End Date *
                   </label>
                   <input
@@ -849,14 +1066,14 @@ export const WeeklyTimetableView: React.FC<WeeklyTimetableViewProps> = ({
                     required
                     value={formEndDate}
                     onChange={(e) => setFormEndDate(e.target.value)}
-                    className="w-full px-3 py-2 border border-slate-300 rounded-xl text-xs font-semibold outline-none focus:ring-2 focus:ring-emerald-600"
+                    className="w-full px-3 py-2 border border-slate-300 rounded-xl text-sm font-semibold outline-none focus:ring-2 focus:ring-emerald-600"
                   />
                 </div>
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
                 <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                  <label className="block text-sm font-bold text-slate-700 mb-1">
                     Week Title / Label *
                   </label>
                   <input
@@ -865,12 +1082,12 @@ export const WeeklyTimetableView: React.FC<WeeklyTimetableViewProps> = ({
                     placeholder="e.g., Week 3: Web Design Mastery — HTML5 & CSS"
                     value={formWeekLabel}
                     onChange={(e) => setFormWeekLabel(e.target.value)}
-                    className="w-full px-3 py-2 border border-slate-300 rounded-xl text-xs font-semibold outline-none focus:ring-2 focus:ring-emerald-600"
+                    className="w-full px-3 py-2 border border-slate-300 rounded-xl text-sm font-semibold outline-none focus:ring-2 focus:ring-emerald-600"
                   />
                 </div>
 
                 <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                  <label className="block text-sm font-bold text-slate-700 mb-1">
                     Weekly Focus / Learning Theme
                   </label>
                   <input
@@ -878,7 +1095,7 @@ export const WeeklyTimetableView: React.FC<WeeklyTimetableViewProps> = ({
                     placeholder="e.g., Building responsive multi-page school club sites"
                     value={formTheme}
                     onChange={(e) => setFormTheme(e.target.value)}
-                    className="w-full px-3 py-2 border border-slate-300 rounded-xl text-xs outline-none focus:ring-2 focus:ring-emerald-600"
+                    className="w-full px-3 py-2 border border-slate-300 rounded-xl text-sm outline-none focus:ring-2 focus:ring-emerald-600"
                   />
                 </div>
               </div>
@@ -887,15 +1104,21 @@ export const WeeklyTimetableView: React.FC<WeeklyTimetableViewProps> = ({
               {cohortCurriculumTopics.length > 0 && (
                 <div className="bg-blue-50/70 border border-blue-200 rounded-xl p-3.5 space-y-2">
                   <div className="flex flex-wrap items-center justify-between gap-2">
-                    <span className="text-xs font-bold text-blue-950 flex items-center space-x-1.5">
-                      <BookOpen className="w-3.5 h-3.5 text-blue-700" />
-                      <span>Quick-Insert from Assigned Curriculum ({selectedCohort?.curriculumSnapshot?.curriculumTitle}):</span>
+                    <span className="text-sm font-bold text-blue-950 flex items-center space-x-1.5">
+                      <BookOpen className="w-4 h-4 text-blue-700" />
+                      <span>
+                        Quick-Insert from{' '}
+                        {activeClass?.curriculumSnapshot?.curriculumTitle ||
+                          selectedCohort?.curriculumSnapshot?.curriculumTitle ||
+                          (activeClass ? `${activeClass.name} Courses` : 'Curriculum')}
+                        :
+                      </span>
                     </span>
-                    <div className="flex items-center space-x-2 text-xs">
+                    <div className="flex items-center space-x-2 text-sm">
                       <select
                         value={quickPickDay}
                         onChange={(e) => setQuickPickDay(e.target.value as TimetableDayOfWeek)}
-                        className="px-2 py-1 border border-blue-200 rounded-lg bg-white text-xs font-semibold"
+                        className="px-2.5 py-1.5 border border-blue-200 rounded-lg bg-white text-sm font-semibold"
                       >
                         {DAYS_OF_WEEK.map((d) => (
                           <option key={d} value={d}>{d}</option>
@@ -905,7 +1128,7 @@ export const WeeklyTimetableView: React.FC<WeeklyTimetableViewProps> = ({
                         type="text"
                         value={quickPickTime}
                         onChange={(e) => setQuickPickTime(e.target.value)}
-                        className="w-28 px-2 py-1 border border-blue-200 rounded-lg bg-white text-xs font-mono"
+                        className="w-32 px-2.5 py-1.5 border border-blue-200 rounded-lg bg-white text-sm font-mono"
                       />
                     </div>
                   </div>
@@ -915,9 +1138,9 @@ export const WeeklyTimetableView: React.FC<WeeklyTimetableViewProps> = ({
                         key={ct.id}
                         type="button"
                         onClick={() => addCurriculumTopicSlot(ct)}
-                        className="text-[11px] bg-white hover:bg-blue-100 text-blue-900 border border-blue-200 px-2.5 py-1 rounded-lg font-semibold transition flex items-center space-x-1"
+                        className="text-xs bg-white hover:bg-blue-100 text-blue-900 border border-blue-200 px-2.5 py-1.5 rounded-lg font-semibold transition flex items-center space-x-1"
                       >
-                        <Plus className="w-3 h-3 text-blue-600" />
+                        <Plus className="w-3.5 h-3.5 text-blue-600" />
                         <span>{ct.title}</span>
                       </button>
                     ))}
@@ -929,15 +1152,15 @@ export const WeeklyTimetableView: React.FC<WeeklyTimetableViewProps> = ({
               <div className="space-y-3">
                 <div className="flex items-center justify-between">
                   <h4 className="text-xs font-extrabold uppercase tracking-wider text-slate-700 flex items-center space-x-1.5">
-                    <Layers className="w-3.5 h-3.5 text-emerald-700" />
+                    <Layers className="w-4 h-4 text-emerald-700" />
                     <span>Daily Topics for Week {formWeekNumber} ({formTopics.length})</span>
                   </h4>
                   <button
                     type="button"
                     onClick={addEmptyTopicSlot}
-                    className="py-1.5 px-3 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 rounded-xl text-xs font-bold flex items-center space-x-1"
+                    className="py-2 px-3.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 rounded-xl text-sm font-bold flex items-center space-x-1.5"
                   >
-                    <Plus className="w-3.5 h-3.5" />
+                    <Plus className="w-4 h-4" />
                     <span>Add Topic Slot</span>
                   </button>
                 </div>
@@ -950,11 +1173,11 @@ export const WeeklyTimetableView: React.FC<WeeklyTimetableViewProps> = ({
                     >
                       <div className="grid grid-cols-1 sm:grid-cols-12 gap-2.5 items-center">
                         <div className="sm:col-span-2">
-                          <label className="block text-[10px] font-bold text-slate-500 uppercase mb-0.5">Day</label>
+                          <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Day</label>
                           <select
                             value={slot.dayOfWeek}
                             onChange={(e) => updateTopicField(idx, 'dayOfWeek', e.target.value)}
-                            className="w-full px-2.5 py-1.5 border border-slate-300 rounded-lg bg-white text-xs font-semibold"
+                            className="w-full px-2.5 py-2 border border-slate-300 rounded-lg bg-white text-sm font-semibold"
                           >
                             {DAYS_OF_WEEK.map((d) => (
                               <option key={d} value={d}>{d}</option>
@@ -963,40 +1186,40 @@ export const WeeklyTimetableView: React.FC<WeeklyTimetableViewProps> = ({
                         </div>
 
                         <div className="sm:col-span-2">
-                          <label className="block text-[10px] font-bold text-slate-500 uppercase mb-0.5">Time</label>
+                          <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Time</label>
                           <input
                             type="text"
                             value={slot.timeSlot}
                             onChange={(e) => updateTopicField(idx, 'timeSlot', e.target.value)}
                             placeholder="08:30 - 10:00"
-                            className="w-full px-2.5 py-1.5 border border-slate-300 rounded-lg bg-white text-xs font-mono"
+                            className="w-full px-2.5 py-2 border border-slate-300 rounded-lg bg-white text-sm font-mono"
                           />
                         </div>
 
                         <div className="sm:col-span-5">
-                          <label className="block text-[10px] font-bold text-slate-500 uppercase mb-0.5">Topic Title *</label>
+                          <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Topic Title *</label>
                           <input
                             type="text"
                             required
                             value={slot.topicTitle}
                             onChange={(e) => updateTopicField(idx, 'topicTitle', e.target.value)}
                             placeholder="e.g., Conditional Branching: if, elif, else"
-                            className="w-full px-2.5 py-1.5 border border-slate-300 rounded-lg bg-white text-xs font-semibold"
+                            className="w-full px-2.5 py-2 border border-slate-300 rounded-lg bg-white text-sm font-semibold"
                           />
                         </div>
 
                         <div className="sm:col-span-2">
-                          <label className="block text-[10px] font-bold text-slate-500 uppercase mb-0.5">Learning Area</label>
+                          <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Learning Area</label>
                           <input
                             type="text"
                             value={slot.learningArea}
                             onChange={(e) => updateTopicField(idx, 'learningArea', e.target.value)}
                             placeholder="e.g., Python"
-                            className="w-full px-2.5 py-1.5 border border-slate-300 rounded-lg bg-white text-xs"
+                            className="w-full px-2.5 py-2 border border-slate-300 rounded-lg bg-white text-sm"
                           />
                         </div>
 
-                        <div className="sm:col-span-1 flex justify-end pt-4">
+                        <div className="sm:col-span-1 flex justify-end pt-5">
                           <button
                             type="button"
                             onClick={() => removeTopicSlot(idx)}
@@ -1010,7 +1233,7 @@ export const WeeklyTimetableView: React.FC<WeeklyTimetableViewProps> = ({
 
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                         <div>
-                          <label className="block text-[10px] font-bold text-slate-500 uppercase mb-0.5">
+                          <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">
                             Practical Activity / Lab Exercise
                           </label>
                           <input
@@ -1018,12 +1241,12 @@ export const WeeklyTimetableView: React.FC<WeeklyTimetableViewProps> = ({
                             value={slot.practicalActivity || ''}
                             onChange={(e) => updateTopicField(idx, 'practicalActivity', e.target.value)}
                             placeholder="e.g., Build a grade calculator program"
-                            className="w-full px-2.5 py-1.5 border border-slate-300 rounded-lg bg-white text-xs"
+                            className="w-full px-2.5 py-2 border border-slate-300 rounded-lg bg-white text-sm"
                           />
                         </div>
 
                         <div>
-                          <label className="block text-[10px] font-bold text-slate-500 uppercase mb-0.5">
+                          <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">
                             Facilitator
                           </label>
                           <input
@@ -1031,7 +1254,7 @@ export const WeeklyTimetableView: React.FC<WeeklyTimetableViewProps> = ({
                             value={slot.facilitator || ''}
                             onChange={(e) => updateTopicField(idx, 'facilitator', e.target.value)}
                             placeholder={currentTeacherName}
-                            className="w-full px-2.5 py-1.5 border border-slate-300 rounded-lg bg-white text-xs"
+                            className="w-full px-2.5 py-2 border border-slate-300 rounded-lg bg-white text-sm"
                           />
                         </div>
                       </div>
@@ -1044,14 +1267,14 @@ export const WeeklyTimetableView: React.FC<WeeklyTimetableViewProps> = ({
                 <button
                   type="button"
                   onClick={() => setShowWeekModal(false)}
-                  className="py-2 px-4 text-xs font-semibold text-slate-600 hover:text-slate-900"
+                  className="py-2 px-4 text-sm font-semibold text-slate-600 hover:text-slate-900"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
                   disabled={savingWeek}
-                  className="py-2.5 px-6 bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 text-white font-bold rounded-xl text-xs shadow-sm"
+                  className="py-2.5 px-6 bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 text-white font-bold rounded-xl text-sm shadow-sm"
                 >
                   {savingWeek ? 'Saving Week...' : editingEntry ? 'Update Week Schedule' : 'Save Week Schedule'}
                 </button>
@@ -1071,7 +1294,7 @@ export const WeeklyTimetableView: React.FC<WeeklyTimetableViewProps> = ({
               </div>
               <div>
                 <h3 className="text-base font-extrabold text-slate-900">Delete Week Entry?</h3>
-                <p className="text-xs text-slate-500">
+                <p className="text-sm text-slate-500">
                   Remove {entryToDelete.weekLabel} ({entryToDelete.programmeTerm}) from the timetable?
                 </p>
               </div>
@@ -1080,7 +1303,7 @@ export const WeeklyTimetableView: React.FC<WeeklyTimetableViewProps> = ({
               <button
                 type="button"
                 onClick={() => setEntryToDelete(null)}
-                className="py-2 px-4 text-xs font-semibold text-slate-600"
+                className="py-2 px-4 text-sm font-semibold text-slate-600"
               >
                 Cancel
               </button>
@@ -1088,7 +1311,7 @@ export const WeeklyTimetableView: React.FC<WeeklyTimetableViewProps> = ({
                 type="button"
                 disabled={deleting}
                 onClick={confirmDeleteWeek}
-                className="py-2 px-4 bg-rose-600 hover:bg-rose-700 text-white font-bold rounded-xl text-xs"
+                className="py-2 px-4 bg-rose-600 hover:bg-rose-700 text-white font-bold rounded-xl text-sm"
               >
                 {deleting ? 'Deleting...' : 'Delete Week'}
               </button>

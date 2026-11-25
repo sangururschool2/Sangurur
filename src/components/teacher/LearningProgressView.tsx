@@ -191,12 +191,12 @@ export const LearningProgressView: React.FC<LearningProgressViewProps> = ({
               <span className="px-2.5 py-0.5 text-xs font-bold rounded-full bg-emerald-100 text-emerald-800 border border-emerald-200">
                 Curriculum Mastery & Progress Monitor
               </span>
-              <span className="text-xs text-slate-500 font-medium">Sangurur Comprehensive School</span>
+              <span className="text-sm text-slate-500 font-medium">Sangurur Comprehensive School</span>
             </div>
             <h2 className="text-xl font-extrabold text-slate-900 tracking-tight mt-1">
               Individual Learner Academic Dossier
             </h2>
-            <p className="text-xs text-slate-500">
+            <p className="text-sm text-slate-500">
               Multi-dimensional evaluation: Attendance vs. Topic Exposure vs. Self-Rated Understanding vs. Teacher Mastery.
             </p>
           </div>
@@ -223,25 +223,25 @@ export const LearningProgressView: React.FC<LearningProgressViewProps> = ({
               generateBootcampCertificatePDF(activeLearner, targetCohort);
             }}
             disabled={!activeLearner}
-            className="py-2 px-3.5 bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 text-white font-bold rounded-xl text-xs flex items-center space-x-1.5 transition shadow-xs"
+            className="py-2 px-3.5 bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 text-white font-bold rounded-xl text-sm flex items-center space-x-1.5 transition shadow-xs"
           >
-            <Award className="w-3.5 h-3.5 text-amber-300" />
+            <Award className="w-4 h-4 text-amber-300" />
             <span>Completion Certificate (PDF)</span>
           </button>
 
           <button
             onClick={handleExportPDF}
             disabled={!activeLearner || learnerRegisters.length === 0}
-            className="py-2 px-3.5 bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white font-bold rounded-xl text-xs flex items-center space-x-1.5 transition shadow-xs"
+            className="py-2 px-3.5 bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white font-bold rounded-xl text-sm flex items-center space-x-1.5 transition shadow-xs"
           >
-            <Printer className="w-3.5 h-3.5 text-amber-300" />
+            <Printer className="w-4 h-4 text-amber-300" />
             <span>Export Learner Dossier (PDF)</span>
           </button>
         </div>
       </div>
 
       {masteryError && (
-        <div className="p-3.5 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-800 flex items-center space-x-2">
+        <div className="p-3.5 bg-rose-50 border border-rose-200 rounded-xl text-sm text-rose-800 flex items-center space-x-2">
           <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
           <span>{masteryError}</span>
         </div>
@@ -259,7 +259,7 @@ export const LearningProgressView: React.FC<LearningProgressViewProps> = ({
               setSelectedCohortId(e.target.value);
               setSelectedLearnerId('');
             }}
-            className="w-full p-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-800 outline-none"
+            className="w-full p-2 bg-slate-50 border border-slate-200 rounded-xl text-sm font-bold text-slate-800 outline-none"
           >
             <option value="all">All Cohorts</option>
             {cohorts.map((c) => (
@@ -277,7 +277,7 @@ export const LearningProgressView: React.FC<LearningProgressViewProps> = ({
           <select
             value={activeLearner?.id || ''}
             onChange={(e) => setSelectedLearnerId(e.target.value)}
-            className="w-full p-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-800 outline-none"
+            className="w-full p-2 bg-slate-50 border border-slate-200 rounded-xl text-sm font-bold text-slate-800 outline-none"
           >
             {cohortLearners.length === 0 ? (
               <option value="">No learners in cohort</option>
@@ -296,55 +296,55 @@ export const LearningProgressView: React.FC<LearningProgressViewProps> = ({
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         {/* Indicator 1: Attendance Rate */}
         <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-xs space-y-2">
-          <div className="flex items-center justify-between text-slate-400">
-            <span className="text-[11px] font-bold uppercase tracking-wider">1. Attendance Rate</span>
+          <div className="flex items-center justify-between text-slate-500">
+            <span className="text-xs font-bold uppercase tracking-wider">1. Attendance Rate</span>
             <Clock className="w-4 h-4 text-emerald-600" />
           </div>
           <div className="flex items-baseline space-x-1.5">
             <span className="text-2xl font-black text-slate-900">{attendanceRate}%</span>
-            <span className="text-xs text-slate-500">({presentSessions}/{totalSessions} sessions)</span>
+            <span className="text-sm text-slate-500">({presentSessions}/{totalSessions} sessions)</span>
           </div>
-          <p className="text-[11px] text-slate-500">
+          <p className="text-xs text-slate-500">
             Physical classroom presence recorded via digital register.
           </p>
         </div>
 
         {/* Indicator 2: Topic Exposure */}
         <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-xs space-y-2">
-          <div className="flex items-center justify-between text-slate-400">
-            <span className="text-[11px] font-bold uppercase tracking-wider">2. Topic Exposure</span>
+          <div className="flex items-center justify-between text-slate-500">
+            <span className="text-xs font-bold uppercase tracking-wider">2. Topic Exposure</span>
             <BookOpen className="w-4 h-4 text-blue-600" />
           </div>
           <div className="flex items-baseline space-x-1.5">
             <span className="text-2xl font-black text-blue-700">{topicExposurePercent}%</span>
-            <span className="text-xs text-slate-500">({uniqueTopicsCovered}/{totalCurriculumTopics} Topics)</span>
+            <span className="text-sm text-slate-500">({uniqueTopicsCovered}/{totalCurriculumTopics} Topics)</span>
           </div>
-          <p className="text-[11px] text-slate-500">
+          <p className="text-xs text-slate-500">
             Curriculum lessons covered with classroom participation.
           </p>
         </div>
 
         {/* Indicator 3: Learner-Reported Understanding */}
         <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-xs space-y-2">
-          <div className="flex items-center justify-between text-slate-400">
-            <span className="text-[11px] font-bold uppercase tracking-wider">3. Self-Rated Understanding</span>
+          <div className="flex items-center justify-between text-slate-500">
+            <span className="text-xs font-bold uppercase tracking-wider">3. Self-Rated Understanding</span>
             <Brain className="w-4 h-4 text-amber-500" />
           </div>
           <div className="flex items-baseline space-x-1.5">
             <span className="text-2xl font-black text-amber-600">{avgUnderstanding}%</span>
-            <span className="text-xs text-slate-500">
+            <span className="text-sm text-slate-500">
               {avgUnderstanding >= 75 ? 'Strong' : avgUnderstanding >= 50 ? 'Moderate' : 'Needs Help'}
             </span>
           </div>
-          <p className="text-[11px] text-slate-500">
+          <p className="text-xs text-slate-500">
             Aggregated student reflection and comprehension ratings.
           </p>
         </div>
 
         {/* Indicator 4: Teacher-Verified Mastery (Independent certification) */}
         <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-xs space-y-2 flex flex-col justify-between">
-          <div className="flex items-center justify-between text-slate-400">
-            <span className="text-[11px] font-bold uppercase tracking-wider">4. Teacher Mastery</span>
+          <div className="flex items-center justify-between text-slate-500">
+            <span className="text-xs font-bold uppercase tracking-wider">4. Teacher Mastery</span>
             <ShieldCheck className="w-4 h-4 text-purple-600" />
           </div>
           <div>
@@ -361,7 +361,7 @@ export const LearningProgressView: React.FC<LearningProgressViewProps> = ({
           <button
             onClick={toggleMasteryCertification}
             disabled={savingMastery || !activeLearner}
-            className={`w-full py-1.5 rounded-xl text-[11px] font-bold transition disabled:opacity-50 ${
+            className={`w-full py-1.5 rounded-xl text-xs font-bold transition disabled:opacity-50 ${
               isMasteryCertified
                 ? 'bg-purple-50 text-purple-700 hover:bg-purple-100'
                 : 'bg-purple-600 hover:bg-purple-700 text-white'
@@ -380,24 +380,24 @@ export const LearningProgressView: React.FC<LearningProgressViewProps> = ({
       <div className="bg-white rounded-2xl border border-slate-200 shadow-xs overflow-hidden">
         <div className="p-4 border-b border-slate-200 flex justify-between items-center bg-slate-50/60">
           <div>
-            <h3 className="font-extrabold text-sm text-slate-900">
+            <h3 className="font-extrabold text-base text-slate-900">
               Session History for {activeLearner?.fullName}
             </h3>
-            <p className="text-xs text-slate-500">
+            <p className="text-sm text-slate-500">
               Admission ID: {activeLearner?.learnerId} • Username: {activeLearner?.username}
             </p>
           </div>
         </div>
 
         {learnerRegisters.length === 0 ? (
-          <div className="p-10 text-center text-xs text-slate-500 space-y-2">
+          <div className="p-10 text-center text-sm text-slate-500 space-y-2">
             <BookOpen className="w-10 h-10 text-slate-300 mx-auto" />
             <p className="font-bold text-slate-700">No session records logged for this learner</p>
             <p>Records will appear as the student completes their daily digital register.</p>
           </div>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full text-left text-xs">
+            <table className="w-full text-left text-sm">
               <thead className="bg-slate-50 border-b border-slate-200 text-slate-600 font-bold">
                 <tr>
                   <th className="py-3 px-4">Date</th>
@@ -414,7 +414,7 @@ export const LearningProgressView: React.FC<LearningProgressViewProps> = ({
                   <tr key={reg.id} className="hover:bg-slate-50/80">
                     <td className="py-3 px-4 font-bold text-slate-900 whitespace-nowrap">{reg.date}</td>
                     <td className="py-3 px-4">
-                      <span className="font-bold uppercase text-[10px] text-emerald-800 bg-emerald-100 px-2 py-0.5 rounded-full">
+                      <span className="font-bold uppercase text-xs text-emerald-800 bg-emerald-100 px-2 py-0.5 rounded-full">
                         {reg.status}
                       </span>
                     </td>

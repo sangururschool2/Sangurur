@@ -2,6 +2,10 @@ import React, { useState, useMemo, useEffect } from 'react';
 import {
   Learner,
   Cohort,
+  CohortLevel,
+  CohortClass,
+  WeeklyTimetableEntry,
+  CLASS_LEVEL_PRESETS,
   EDUCATION_LEVEL_BANDS,
   classifyEducationLevel,
 } from '../../types';
@@ -21,6 +25,7 @@ import {
   createLearnerDirect,
   bulkImportLearnersDirect,
   resetLearnerPasswordDirect,
+  getWeeklyTimetable,
 } from '../../services/dataService';
 import { SchoolLogo } from '../common/SchoolLogo';
 import { DigitalIdCardModal } from '../common/DigitalIdCardModal';
@@ -40,11 +45,15 @@ import {
   Layers,
   GraduationCap,
   CreditCard,
+  BookOpen,
+  CalendarDays,
 } from 'lucide-react';
 
 interface LearnerManagementViewProps {
   learners: Learner[];
   cohorts: Cohort[];
+  cohortLevels?: CohortLevel[];
+  cohortClasses?: CohortClass[];
   onRefresh: () => Promise<void>;
   initialGradeFilter?: string;
 }
@@ -52,11 +61,14 @@ interface LearnerManagementViewProps {
 export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
   learners,
   cohorts,
+  cohortLevels = [],
+  cohortClasses = [],
   onRefresh,
   initialGradeFilter = 'all',
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [cohortFilter, setCohortFilter] = useState<string>('all');
+  const [classFilter, setClassFilter] = useState<string>('all');
   const [schoolFilter, setSchoolFilter] = useState<string>('all');
   const [gradeFilter, setGradeFilter] = useState<string>(initialGradeFilter || 'all');
 
@@ -70,6 +82,8 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
   const [singleSchoolName, setSingleSchoolName] = useState('Sangurur Comprehensive School');
   const [singleGrade, setSingleGrade] = useState('Grade 7');
   const [singleCohortId, setSingleCohortId] = useState(cohorts[0]?.id || '');
+  const [singleClassId, setSingleClassId] = useState('');
+  const [singleClassTimetable, setSingleClassTimetable] = useState<WeeklyTimetableEntry[]>([]);
   const [singleGender, setSingleGender] = useState<'male' | 'female' | 'other'>('male');
   const [singleAge, setSingleAge] = useState<number | ''>(13);
   const [singleGuardian, setSingleGuardian] = useState('');
@@ -80,6 +94,8 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
   // Bulk Import Modal
   const [showBulkModal, setShowBulkModal] = useState(false);
   const [bulkCohortId, setBulkCohortId] = useState(cohorts[0]?.id || '');
+  const [bulkClassId, setBulkClassId] = useState('');
+  const [bulkClassTimetable, setBulkClassTimetable] = useState<WeeklyTimetableEntry[]>([]);
   const [parsedRows, setParsedRows] = useState<ParsedLearnerRow[]>([]);
   const [bulkFile, setBulkFile] = useState<File | null>(null);
   const [bulkParsing, setBulkParsing] = useState(false);
@@ -106,6 +122,8 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
   const [newlyCreatedSlip, setNewlyCreatedSlip] = useState<{
     learner: Learner;
     cohortName: string;
+    className?: string;
+    levelName?: string;
     initialPassword: string;
   } | null>(null);
 
@@ -127,6 +145,91 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
     return Array.from(set).sort((a, b) => a.localeCompare(b));
   }, [learners]);
 
+  const singleCohortClasses = useMemo(
+    () => cohortClasses.filter((c) => c.cohortId === singleCohortId),
+    [cohortClasses, singleCohortId]
+  );
+
+  const selectedSingleClass = useMemo(
+    () => singleCohortClasses.find((c) => c.id === singleClassId) || null,
+    [singleCohortClasses, singleClassId]
+  );
+
+  const bulkCohortClasses = useMemo(
+    () => cohortClasses.filter((c) => c.cohortId === bulkCohortId),
+    [cohortClasses, bulkCohortId]
+  );
+
+  const selectedBulkClass = useMemo(
+    () => bulkCohortClasses.find((c) => c.id === bulkClassId) || null,
+    [bulkCohortClasses, bulkClassId]
+  );
+
+  const filterBarClasses = useMemo(
+    () =>
+      cohortFilter === 'all'
+        ? cohortClasses
+        : cohortClasses.filter((c) => c.cohortId === cohortFilter),
+    [cohortClasses, cohortFilter]
+  );
+
+  useEffect(() => {
+    if (!showSingleModal) return;
+    if (singleCohortClasses.length === 0) {
+      setSingleClassId('');
+      return;
+    }
+    if (!singleCohortClasses.some((c) => c.id === singleClassId)) {
+      const firstCls = singleCohortClasses[0];
+      setSingleClassId(firstCls.id);
+      const preset = CLASS_LEVEL_PRESETS.find((p) =>
+        firstCls.name.toLowerCase().includes(p.name.toLowerCase())
+      );
+      if (preset) setSingleGrade(preset.defaultGrade);
+    }
+  }, [showSingleModal, singleCohortId, singleCohortClasses, singleClassId]);
+
+  useEffect(() => {
+    if (!showBulkModal) return;
+    if (bulkCohortClasses.length === 0) {
+      setBulkClassId('');
+      return;
+    }
+    if (!bulkCohortClasses.some((c) => c.id === bulkClassId)) {
+      setBulkClassId(bulkCohortClasses[0].id);
+    }
+  }, [showBulkModal, bulkCohortId, bulkCohortClasses, bulkClassId]);
+
+  useEffect(() => {
+    if (!showSingleModal || !singleCohortId) return;
+    let cancelled = false;
+    getWeeklyTimetable(singleCohortId, singleClassId || undefined)
+      .then((entries) => {
+        if (!cancelled) setSingleClassTimetable(entries);
+      })
+      .catch(() => {
+        if (!cancelled) setSingleClassTimetable([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [showSingleModal, singleCohortId, singleClassId]);
+
+  useEffect(() => {
+    if (!showBulkModal || !bulkCohortId) return;
+    let cancelled = false;
+    getWeeklyTimetable(bulkCohortId, bulkClassId || undefined)
+      .then((entries) => {
+        if (!cancelled) setBulkClassTimetable(entries);
+      })
+      .catch(() => {
+        if (!cancelled) setBulkClassTimetable([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [showBulkModal, bulkCohortId, bulkClassId]);
+
   // Filter learners
   const filteredLearners = learners.filter((lr) => {
     const lrSchool = (lr.schoolName || 'Sangurur Comprehensive School').trim();
@@ -138,16 +241,22 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
       (lr.digitalId && lr.digitalId.toLowerCase().includes(searchTerm.toLowerCase())) ||
       lr.username.toLowerCase().includes(searchTerm.toLowerCase()) ||
       lrSchool.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      (lr.grade && lr.grade.toLowerCase().includes(searchTerm.toLowerCase()));
+      (lr.grade && lr.grade.toLowerCase().includes(searchTerm.toLowerCase())) ||
+      (lr.className && lr.className.toLowerCase().includes(searchTerm.toLowerCase())) ||
+      (lr.levelName && lr.levelName.toLowerCase().includes(searchTerm.toLowerCase()));
     const matchesCohort =
       cohortFilter === 'all' || (lr.assignedCohortIds || []).includes(cohortFilter);
+    const matchesClass =
+      classFilter === 'all' ||
+      lr.classId === classFilter ||
+      (lr.assignedClassIds || []).includes(classFilter);
     const matchesSchool = schoolFilter === 'all' || lrSchool === schoolFilter;
     const matchesGrade =
       gradeFilter === 'all' ||
       (gradeFilter.startsWith('level:')
         ? lrTier === gradeFilter.replace('level:', '')
         : (lr.grade || '').toLowerCase() === gradeFilter.toLowerCase());
-    return matchesSearch && matchesCohort && matchesSchool && matchesGrade;
+    return matchesSearch && matchesCohort && matchesClass && matchesSchool && matchesGrade;
   });
 
   // Handle Single Learner Submission
@@ -155,6 +264,11 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
     e.preventDefault();
     setSubmittingSingle(true);
     setSingleError(null);
+
+    const chosenClass = selectedSingleClass;
+    const chosenLevel = chosenClass
+      ? cohortLevels.find((l) => l.id === chosenClass.levelId)
+      : undefined;
 
     try {
       let createdLearner: Learner;
@@ -164,6 +278,10 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
           schoolName: singleSchoolName.trim() || 'Sangurur Comprehensive School',
           grade: singleGrade,
           cohortId: singleCohortId,
+          levelId: chosenClass?.levelId || chosenLevel?.id,
+          levelName: chosenClass?.levelName || chosenLevel?.name,
+          classId: chosenClass?.id,
+          className: chosenClass?.name,
           gender: singleGender,
           age: singleAge || undefined,
           guardianContact: singleGuardian,
@@ -182,6 +300,10 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
             schoolName: singleSchoolName.trim() || 'Sangurur Comprehensive School',
             grade: singleGrade,
             cohortId: singleCohortId,
+            levelId: chosenClass?.levelId || chosenLevel?.id,
+            levelName: chosenClass?.levelName || chosenLevel?.name,
+            classId: chosenClass?.id,
+            className: chosenClass?.name,
             gender: singleGender,
             age: singleAge || undefined,
             guardianContact: singleGuardian,
@@ -209,6 +331,8 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
       setNewlyCreatedSlip({
         learner: createdLearner,
         cohortName,
+        className: createdLearner.className || chosenClass?.name,
+        levelName: createdLearner.levelName || chosenClass?.levelName,
         initialPassword: '123456789',
       });
 
@@ -275,11 +399,20 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
     setBulkSubmitting(true);
     setBulkError(null);
 
+    const chosenBulkClass = selectedBulkClass;
+    const chosenBulkLevel = chosenBulkClass
+      ? cohortLevels.find((l) => l.id === chosenBulkClass.levelId)
+      : undefined;
+
     try {
       let data: { createdCount: number; learners: Learner[] };
       if (!teacherToken && auth.currentUser) {
         data = await bulkImportLearnersDirect({
           cohortId: bulkCohortId,
+          levelId: chosenBulkClass?.levelId || chosenBulkLevel?.id,
+          levelName: chosenBulkClass?.levelName || chosenBulkLevel?.name,
+          classId: chosenBulkClass?.id,
+          className: chosenBulkClass?.name,
           learners: validRows,
           teacherId: teacherProfile?.uid || auth.currentUser.uid,
           teacherName: teacherProfile?.fullName || 'Staff Teacher',
@@ -292,6 +425,10 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
           headers,
           body: JSON.stringify({
             cohortId: bulkCohortId,
+            levelId: chosenBulkClass?.levelId || chosenBulkLevel?.id,
+            levelName: chosenBulkClass?.levelName || chosenBulkLevel?.name,
+            classId: chosenBulkClass?.id,
+            className: chosenBulkClass?.name,
             learners: validRows,
             teacherId: teacherProfile?.uid || 'teacher_staff',
             teacherName: teacherProfile?.fullName || 'Staff Teacher',
@@ -398,7 +535,7 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
           <h2 className="text-xl font-extrabold text-slate-900 tracking-tight">
             Learner Registration & Credentials
           </h2>
-          <p className="text-xs text-slate-500">
+          <p className="text-sm text-slate-500">
             Register students individually or in bulk, generate secure credentials, and print access slips.
           </p>
         </div>
@@ -406,43 +543,49 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
         <div className="flex flex-wrap items-center gap-2.5">
           <button
             onClick={() => {
-              setSingleCohortId(cohorts[0]?.id || '');
+              const firstCohortId = cohorts[0]?.id || '';
+              setSingleCohortId(firstCohortId);
+              const firstCls = cohortClasses.find((c) => c.cohortId === firstCohortId);
+              setSingleClassId(firstCls?.id || '');
               setShowSingleModal(true);
             }}
-            className="py-2 px-3.5 bg-emerald-700 hover:bg-emerald-800 text-white font-bold rounded-xl text-xs flex items-center space-x-1.5 transition shadow-xs"
+            className="py-2 px-4 bg-emerald-700 hover:bg-emerald-800 text-white font-bold rounded-xl text-sm flex items-center space-x-1.5 transition shadow-xs"
           >
-            <UserPlus className="w-3.5 h-3.5" />
+            <UserPlus className="w-4 h-4" />
             <span>Add Single Learner</span>
           </button>
 
           <button
             onClick={() => {
-              setBulkCohortId(cohorts[0]?.id || '');
+              const firstCohortId = cohorts[0]?.id || '';
+              setBulkCohortId(firstCohortId);
+              const firstCls = cohortClasses.find((c) => c.cohortId === firstCohortId);
+              setBulkClassId(firstCls?.id || '');
               setParsedRows([]);
               setBulkFile(null);
               setBulkError(null);
               setBulkSuccessMessage(null);
               setShowBulkModal(true);
             }}
-            className="py-2 px-3.5 bg-blue-700 hover:bg-blue-800 text-white font-bold rounded-xl text-xs flex items-center space-x-1.5 transition shadow-xs"
+            className="py-2 px-4 bg-blue-700 hover:bg-blue-800 text-white font-bold rounded-xl text-sm flex items-center space-x-1.5 transition shadow-xs"
           >
-            <Upload className="w-3.5 h-3.5" />
+            <Upload className="w-4 h-4" />
             <span>Bulk Excel / CSV Import</span>
           </button>
 
           <button
             onClick={handleGenerateSlips}
             disabled={filteredLearners.length === 0}
-            className="py-2 px-3.5 bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white font-bold rounded-xl text-xs flex items-center space-x-1.5 transition shadow-xs"
+            className="py-2 px-4 bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white font-bold rounded-xl text-sm flex items-center space-x-1.5 transition shadow-xs"
           >
-            <Printer className="w-3.5 h-3.5 text-amber-300" />
+            <Printer className="w-4 h-4 text-amber-300" />
             <span>Print Login Slips (PDF)</span>
           </button>
         </div>
       </div>
 
       {actionError && (
-        <div className="p-3.5 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-800 flex items-center justify-between gap-3">
+        <div className="p-3.5 bg-rose-50 border border-rose-200 rounded-xl text-sm text-rose-800 flex items-center justify-between gap-3">
           <div className="flex items-center space-x-2">
             <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
             <span>{actionError}</span>
@@ -458,24 +601,24 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
       )}
 
       {/* Filter and Search Bar */}
-      <div className="bg-white p-3.5 rounded-2xl border border-slate-200 shadow-xs grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3 items-center">
+      <div className="bg-white p-3.5 rounded-2xl border border-slate-200 shadow-xs grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 items-center">
         <div className="relative w-full">
-          <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5 pointer-events-none" />
+          <Search className="w-4 h-4 text-slate-400 absolute left-3 top-3 pointer-events-none" />
           <input
             type="text"
-            placeholder="Search name, ID, school, grade..."
+            placeholder="Search name, ID, class, grade..."
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
-            className="w-full pl-9 pr-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:ring-2 focus:ring-emerald-600 focus:bg-white outline-none"
+            className="w-full pl-9 pr-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-emerald-600 focus:bg-white outline-none"
           />
         </div>
 
         <div className="flex items-center space-x-2">
-          <span className="text-[11px] font-bold text-slate-500 whitespace-nowrap">School:</span>
+          <span className="text-xs font-bold text-slate-500 whitespace-nowrap">School:</span>
           <select
             value={schoolFilter}
             onChange={(e) => setSchoolFilter(e.target.value)}
-            className="w-full py-2 px-3 bg-white border border-slate-200 rounded-xl text-xs font-semibold text-slate-700 focus:ring-2 focus:ring-emerald-600 outline-none"
+            className="w-full py-2 px-3 bg-white border border-slate-200 rounded-xl text-sm font-semibold text-slate-700 focus:ring-2 focus:ring-emerald-600 outline-none"
           >
             <option value="all">All Schools ({distinctSchools.length})</option>
             {distinctSchools.map((school) => (
@@ -487,11 +630,11 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
         </div>
 
         <div className="flex items-center space-x-2">
-          <span className="text-[11px] font-bold text-slate-500 whitespace-nowrap">Grade:</span>
+          <span className="text-xs font-bold text-slate-500 whitespace-nowrap">Grade:</span>
           <select
             value={gradeFilter}
             onChange={(e) => setGradeFilter(e.target.value)}
-            className="w-full py-2 px-3 bg-white border border-slate-200 rounded-xl text-xs font-semibold text-slate-700 focus:ring-2 focus:ring-emerald-600 outline-none"
+            className="w-full py-2 px-3 bg-white border border-slate-200 rounded-xl text-sm font-semibold text-slate-700 focus:ring-2 focus:ring-emerald-600 outline-none"
           >
             <option value="all">All Grades & Levels</option>
             <optgroup label="Education Levels">
@@ -514,16 +657,35 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
         </div>
 
         <div className="flex items-center space-x-2">
-          <span className="text-[11px] font-bold text-slate-500 whitespace-nowrap">Cohort:</span>
+          <span className="text-xs font-bold text-slate-500 whitespace-nowrap">Cohort:</span>
           <select
             value={cohortFilter}
-            onChange={(e) => setCohortFilter(e.target.value)}
-            className="w-full py-2 px-3 bg-white border border-slate-200 rounded-xl text-xs font-semibold text-slate-700 focus:ring-2 focus:ring-emerald-600 outline-none"
+            onChange={(e) => {
+              setCohortFilter(e.target.value);
+              setClassFilter('all');
+            }}
+            className="w-full py-2 px-3 bg-white border border-slate-200 rounded-xl text-sm font-semibold text-slate-700 focus:ring-2 focus:ring-emerald-600 outline-none"
           >
             <option value="all">All Cohorts ({learners.length})</option>
             {cohorts.map((c) => (
               <option key={c.id} value={c.id}>
                 {c.name} ({c.code})
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="flex items-center space-x-2">
+          <span className="text-xs font-bold text-slate-500 whitespace-nowrap">Class:</span>
+          <select
+            value={classFilter}
+            onChange={(e) => setClassFilter(e.target.value)}
+            className="w-full py-2 px-3 bg-white border border-slate-200 rounded-xl text-sm font-semibold text-slate-700 focus:ring-2 focus:ring-emerald-600 outline-none"
+          >
+            <option value="all">All Classes ({filterBarClasses.length})</option>
+            {filterBarClasses.map((cls) => (
+              <option key={cls.id} value={cls.id}>
+                {cls.levelName ? `${cls.levelName} → ` : ''}{cls.name} ({cls.code})
               </option>
             ))}
           </select>
@@ -534,10 +696,10 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
       <div className="bg-white rounded-2xl border border-slate-200 shadow-xs overflow-hidden">
         <div className="p-4 border-b border-slate-200 flex flex-wrap justify-between items-center gap-2 bg-slate-50/60">
           <div className="flex items-center space-x-2">
-            <span className="text-xs font-bold text-slate-700">
+            <span className="text-sm font-bold text-slate-700">
               Showing {filteredLearners.length} Registered Learners
             </span>
-            {(schoolFilter !== 'all' || gradeFilter !== 'all' || cohortFilter !== 'all' || searchTerm) && (
+            {(schoolFilter !== 'all' || gradeFilter !== 'all' || cohortFilter !== 'all' || classFilter !== 'all' || searchTerm) && (
               <button
                 type="button"
                 onClick={() => {
@@ -545,28 +707,29 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
                   setSchoolFilter('all');
                   setGradeFilter('all');
                   setCohortFilter('all');
+                  setClassFilter('all');
                 }}
-                className="text-[11px] font-bold text-emerald-700 hover:underline"
+                className="text-xs font-bold text-emerald-700 hover:underline"
               >
                 Clear filters
               </button>
             )}
           </div>
-          <span className="text-[11px] text-slate-500">
+          <span className="text-xs text-slate-500">
             Passwords protected with server PBKDF2 hashing
           </span>
         </div>
 
         {filteredLearners.length === 0 ? (
-          <div className="p-10 text-center text-xs text-slate-500 space-y-2">
+          <div className="p-10 text-center text-sm text-slate-500 space-y-2">
             <GraduationCap className="w-10 h-10 text-slate-300 mx-auto" />
             <p className="font-bold text-slate-700">No learners found matching these filters</p>
             <p>Adjust your school/grade filters or click "Add Single Learner" to register students.</p>
           </div>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full text-left text-xs">
-              <thead className="bg-slate-50 border-b border-slate-200 text-slate-600 font-bold">
+            <table className="w-full text-left text-sm">
+              <thead className="bg-slate-50 border-b border-slate-200 text-slate-600 text-xs uppercase tracking-wider font-bold">
                 <tr>
                   <th className="py-3 px-4">#</th>
                   <th className="py-3 px-4">Learner Name</th>
@@ -596,18 +759,18 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
                       <td className="py-3 px-4 text-slate-400">{idx + 1}</td>
                       <td className="py-3 px-4">
                         <strong className="text-slate-900 block">{lr.fullName}</strong>
-                        <span className="text-[11px] text-slate-400 capitalize">
+                        <span className="text-xs text-slate-400 capitalize">
                           {lr.gender || 'Not specified'} • Age {lr.age || '—'}
                         </span>
                       </td>
                       <td className="py-3 px-4">
-                        <span className="font-semibold text-slate-800 block text-xs">{lrSchool}</span>
+                        <span className="font-semibold text-slate-800 block text-sm">{lrSchool}</span>
                         <div className="flex flex-wrap items-center gap-1 mt-0.5">
-                          <span className="px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-800 border border-emerald-200 font-bold text-[10px]">
+                          <span className="px-2 py-0.5 rounded bg-emerald-50 text-emerald-800 border border-emerald-200 font-bold text-xs">
                             {lr.grade || assignedCohort?.learningLevel || 'Grade Unspecified'}
                           </span>
                           {tierMeta && (
-                            <span className="px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 font-semibold text-[10px]">
+                            <span className="px-2 py-0.5 rounded bg-slate-100 text-slate-600 font-semibold text-xs">
                               {tierMeta.label}
                             </span>
                           )}
@@ -619,12 +782,28 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
                         </span>
                       </td>
                       <td className="py-3 px-4">
-                        <span className="px-2 py-0.5 rounded-md bg-slate-100 text-slate-700 font-bold text-[10px]">
-                          {assignedCohortNames || 'No Cohort'}
-                        </span>
+                        <div className="space-y-1">
+                          <span className="px-2 py-0.5 rounded-md bg-slate-100 text-slate-700 font-bold text-xs inline-block">
+                            {assignedCohortNames || 'No Cohort'}
+                          </span>
+                          {(lr.levelName || lr.className) && (
+                            <div className="flex flex-wrap items-center gap-1">
+                              {lr.levelName && (
+                                <span className="px-2 py-0.5 rounded bg-blue-50 text-blue-800 border border-blue-200 text-xs font-semibold">
+                                  {lr.levelName}
+                                </span>
+                              )}
+                              {lr.className && (
+                                <span className="px-2 py-0.5 rounded bg-emerald-50 text-emerald-800 border border-emerald-200 text-xs font-bold">
+                                  {lr.className}
+                                </span>
+                              )}
+                            </div>
+                          )}
+                        </div>
                       </td>
                       <td className="py-3 px-4">
-                        <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 font-bold text-[10px] inline-flex items-center space-x-1">
+                        <span className="px-2.5 py-0.5 rounded-full bg-emerald-100 text-emerald-800 font-bold text-xs inline-flex items-center space-x-1">
                           <span className="w-1.5 h-1.5 rounded-full bg-emerald-600 inline-block"></span>
                           <span>{lr.status || 'ACTIVE'}</span>
                         </span>
@@ -632,16 +811,16 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
                       <td className="py-3 px-4">
                         {lr.mustChangePassword || lr.isFirstLogin ? (
                           <div className="space-y-0.5">
-                            <span className="px-2 py-0.5 rounded-full bg-amber-100 text-amber-900 font-bold text-[10px] inline-block">
+                            <span className="px-2.5 py-0.5 rounded-full bg-amber-100 text-amber-900 font-bold text-xs inline-block">
                               Must Change Password
                             </span>
-                            <span className="text-[10px] text-slate-500 block font-mono">
+                            <span className="text-xs text-slate-500 block font-mono">
                               Default: 123456789
                             </span>
                           </div>
                         ) : (
-                          <span className="px-2 py-0.5 rounded-full bg-slate-100 text-slate-700 font-bold text-[10px] inline-flex items-center space-x-1">
-                            <Check className="w-3 h-3 text-emerald-600" />
+                          <span className="px-2.5 py-0.5 rounded-full bg-slate-100 text-slate-700 font-bold text-xs inline-flex items-center space-x-1">
+                            <Check className="w-3.5 h-3.5 text-emerald-600" />
                             <span>Personal Password Active</span>
                           </span>
                         )}
@@ -655,10 +834,10 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
                                 cohortName: assignedCohort ? `${assignedCohort.name} (${assignedCohort.code})` : 'Sangurur School Cohort',
                               })
                             }
-                            className="py-1 px-2.5 bg-blue-50 hover:bg-blue-100 text-blue-800 border border-blue-200 rounded-lg text-xs font-semibold transition inline-flex items-center space-x-1 shadow-2xs"
+                            className="py-1.5 px-2.5 bg-blue-50 hover:bg-blue-100 text-blue-800 border border-blue-200 rounded-lg text-xs font-semibold transition inline-flex items-center space-x-1 shadow-2xs"
                             title="View & download official Digital ID Card"
                           >
-                            <CreditCard className="w-3 h-3 text-blue-700" />
+                            <CreditCard className="w-3.5 h-3.5 text-blue-700" />
                             <span>ID Card</span>
                           </button>
 
@@ -670,20 +849,20 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
                                 newPasswordMap[lr.id] || '123456789'
                               );
                             }}
-                            className="py-1 px-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-semibold transition inline-flex items-center space-x-1 shadow-2xs"
+                            className="py-1.5 px-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-semibold transition inline-flex items-center space-x-1 shadow-2xs"
                             title="Print official login slip with Digital ID"
                           >
-                            <Printer className="w-3 h-3 text-slate-600" />
+                            <Printer className="w-3.5 h-3.5 text-slate-600" />
                             <span>Print Slip</span>
                           </button>
 
                           <button
                             onClick={() => setConfirmResetTarget(lr)}
                             disabled={resettingId === lr.id}
-                            className="py-1 px-2.5 bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-200 rounded-lg text-xs font-semibold transition inline-flex items-center space-x-1 shadow-2xs"
+                            className="py-1.5 px-2.5 bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-200 rounded-lg text-xs font-semibold transition inline-flex items-center space-x-1 shadow-2xs"
                             title="Reset password to default (123456789)"
                           >
-                            <KeyRound className="w-3 h-3 text-amber-700" />
+                            <KeyRound className="w-3.5 h-3.5 text-amber-700" />
                             <span>{resettingId === lr.id ? 'Resetting...' : 'Reset'}</span>
                           </button>
                         </div>
@@ -706,7 +885,7 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
                 <h3 className="font-extrabold text-base tracking-tight">
                   Register Individual Learner
                 </h3>
-                <p className="text-emerald-100 text-xs">
+                <p className="text-emerald-100 text-sm">
                   Sangurur Comprehensive School
                 </p>
               </div>
@@ -720,7 +899,7 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
 
             <form onSubmit={handleSingleSubmit} className="p-6 space-y-4 overflow-y-auto flex-1">
               {singleError && (
-                <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-800">
+                <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-sm text-rose-800">
                   {singleError}
                 </div>
               )}
@@ -735,7 +914,7 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
                   placeholder="Enter learner's full name"
                   value={singleName}
                   onChange={(e) => setSingleName(e.target.value)}
-                  className="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-xs focus:ring-2 focus:ring-emerald-600 outline-none"
+                  className="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-sm focus:ring-2 focus:ring-emerald-600 outline-none"
                 />
               </div>
 
@@ -751,7 +930,7 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
                     placeholder="e.g. Sangurur Comprehensive School"
                     value={singleSchoolName}
                     onChange={(e) => setSingleSchoolName(e.target.value)}
-                    className="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-xs focus:ring-2 focus:ring-emerald-600 outline-none"
+                    className="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-sm focus:ring-2 focus:ring-emerald-600 outline-none"
                   />
                   <datalist id="registered-schools-list">
                     {distinctSchools.map((s) => (
@@ -768,7 +947,7 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
                     required
                     value={singleGrade}
                     onChange={(e) => setSingleGrade(e.target.value)}
-                    className="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-xs font-semibold focus:ring-2 focus:ring-emerald-600 outline-none"
+                    className="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-sm font-semibold focus:ring-2 focus:ring-emerald-600 outline-none"
                   >
                     {EDUCATION_LEVEL_BANDS.map((band) => (
                       <optgroup key={band.key} label={`${band.label} (${band.shortRange})`}>
@@ -790,8 +969,20 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
                 <select
                   required
                   value={singleCohortId}
-                  onChange={(e) => setSingleCohortId(e.target.value)}
-                  className="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-xs focus:ring-2 focus:ring-emerald-600 outline-none"
+                  onChange={(e) => {
+                    const nextCohortId = e.target.value;
+                    setSingleCohortId(nextCohortId);
+                    const nextClasses = cohortClasses.filter((c) => c.cohortId === nextCohortId);
+                    const nextCls = nextClasses[0];
+                    setSingleClassId(nextCls?.id || '');
+                    if (nextCls) {
+                      const preset = CLASS_LEVEL_PRESETS.find((p) =>
+                        nextCls.name.toLowerCase().includes(p.name.toLowerCase())
+                      );
+                      if (preset) setSingleGrade(preset.defaultGrade);
+                    }
+                  }}
+                  className="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-sm focus:ring-2 focus:ring-emerald-600 outline-none"
                 >
                   {cohorts.map((c) => (
                     <option key={c.id} value={c.id}>
@@ -801,6 +992,93 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
                 </select>
               </div>
 
+              {singleCohortClasses.length > 0 && (
+                <div className="space-y-2.5">
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
+                      Level & Class Assignment *
+                    </label>
+                    <select
+                      value={singleClassId}
+                      onChange={(e) => {
+                        const cid = e.target.value;
+                        setSingleClassId(cid);
+                        const cls = singleCohortClasses.find((c) => c.id === cid);
+                        if (cls) {
+                          const preset = CLASS_LEVEL_PRESETS.find((p) =>
+                            cls.name.toLowerCase().includes(p.name.toLowerCase())
+                          );
+                          if (preset) setSingleGrade(preset.defaultGrade);
+                        }
+                      }}
+                      className="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-sm font-semibold focus:ring-2 focus:ring-emerald-600 outline-none"
+                    >
+                      {cohortLevels
+                        .filter((l) => l.cohortId === singleCohortId)
+                        .map((lvl) => {
+                          const classesInLvl = singleCohortClasses.filter((c) => c.levelId === lvl.id);
+                          if (classesInLvl.length === 0) return null;
+                          return (
+                            <optgroup key={lvl.id} label={lvl.name}>
+                              {classesInLvl.map((cls) => (
+                                <option key={cls.id} value={cls.id}>
+                                  {cls.name} ({cls.code}) {cls.gradeBand ? `• ${cls.gradeBand}` : ''}
+                                </option>
+                              ))}
+                            </optgroup>
+                          );
+                        })}
+                      {singleCohortClasses
+                        .filter((c) => !cohortLevels.some((l) => l.id === c.levelId))
+                        .map((cls) => (
+                          <option key={cls.id} value={cls.id}>
+                            {cls.levelName ? `${cls.levelName} → ` : ''}{cls.name} ({cls.code})
+                          </option>
+                        ))}
+                    </select>
+                  </div>
+
+                  {selectedSingleClass && (
+                    <div className="bg-blue-50/70 border border-blue-200 rounded-xl p-3 space-y-2 text-xs">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-extrabold text-blue-950 flex items-center space-x-1">
+                          <Layers className="w-3.5 h-3.5 text-blue-700" />
+                          <span>
+                            Enrollment Package: {selectedSingleClass.levelName} → {selectedSingleClass.name}
+                          </span>
+                        </span>
+                        <span className="px-2 py-0.5 rounded-full bg-white border border-blue-200 text-blue-900 font-bold text-xs">
+                          {selectedSingleClass.coursesOffered?.length || 0} Courses
+                        </span>
+                      </div>
+
+                      {selectedSingleClass.coursesOffered && selectedSingleClass.coursesOffered.length > 0 && (
+                        <div className="flex flex-wrap gap-1">
+                          {selectedSingleClass.coursesOffered.map((crs) => (
+                            <span
+                              key={crs.id}
+                              className="px-2 py-0.5 rounded-md bg-white border border-blue-200 text-slate-800 font-semibold text-xs inline-flex items-center space-x-1"
+                            >
+                              <BookOpen className="w-3 h-3 text-emerald-700" />
+                              <span>{crs.title}</span>
+                            </span>
+                          ))}
+                        </div>
+                      )}
+
+                      <div className="flex items-center space-x-1.5 text-blue-900 font-medium pt-0.5">
+                        <CalendarDays className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
+                        <span>
+                          {singleClassTimetable.length > 0
+                            ? `Includes ${singleClassTimetable.length}-week class timetable (${singleClassTimetable[0].topics?.length || 0} scheduled sessions in Week 1)`
+                            : 'Class timetable will automatically sync to this student once scheduled.'}
+                        </span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
@@ -809,7 +1087,7 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
                   <select
                     value={singleGender}
                     onChange={(e) => setSingleGender(e.target.value as any)}
-                    className="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-xs focus:ring-2 focus:ring-emerald-600 outline-none"
+                    className="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-sm focus:ring-2 focus:ring-emerald-600 outline-none"
                   >
                     <option value="male">Male</option>
                     <option value="female">Female</option>
@@ -827,7 +1105,7 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
                     max={25}
                     value={singleAge}
                     onChange={(e) => setSingleAge(Number(e.target.value) || '')}
-                    className="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-xs focus:ring-2 focus:ring-emerald-600 outline-none"
+                    className="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-sm focus:ring-2 focus:ring-emerald-600 outline-none"
                   />
                 </div>
               </div>
@@ -841,16 +1119,16 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
                   placeholder="+254 712 345 678"
                   value={singleGuardian}
                   onChange={(e) => setSingleGuardian(e.target.value)}
-                  className="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-xs focus:ring-2 focus:ring-emerald-600 outline-none"
+                  className="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-sm focus:ring-2 focus:ring-emerald-600 outline-none"
                 />
               </div>
 
-              <div className="bg-emerald-50 p-3.5 rounded-xl border border-emerald-200 text-xs text-emerald-950 space-y-1.5">
+              <div className="bg-emerald-50 p-3.5 rounded-xl border border-emerald-200 text-sm text-emerald-950 space-y-1.5">
                 <p className="font-bold flex items-center space-x-1.5 text-emerald-900">
                   <ShieldCheck className="w-4 h-4 text-emerald-700 shrink-0" />
                   <span>Mandatory Security Credentials Protocol:</span>
                 </p>
-                <ul className="list-disc list-inside text-[11px] text-emerald-800 space-y-0.5 pl-1">
+                <ul className="list-disc list-inside text-xs text-emerald-800 space-y-0.5 pl-1">
                   <li><strong>Digital ID:</strong> Automatically generated sequential ID (e.g. <code className="font-mono bg-emerald-100/60 px-1 py-0.5 rounded">SG-LRN-2026-001</code>).</li>
                   <li><strong>Username:</strong> Digital ID serves as the student's login username.</li>
                   <li><strong>Initial Default Password:</strong> <code className="font-mono bg-emerald-100/60 px-1 py-0.5 rounded font-bold">123456789</code>.</li>
@@ -862,14 +1140,14 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
                 <button
                   type="button"
                   onClick={() => setShowSingleModal(false)}
-                  className="py-2 px-4 text-xs text-slate-600 font-semibold"
+                  className="py-2 px-4 text-sm text-slate-600 font-semibold"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
                   disabled={submittingSingle}
-                  className="py-2.5 px-5 bg-emerald-700 hover:bg-emerald-800 text-white font-bold rounded-xl text-xs shadow-md transition"
+                  className="py-2.5 px-5 bg-emerald-700 hover:bg-emerald-800 text-white font-bold rounded-xl text-sm shadow-md transition"
                 >
                   {submittingSingle ? 'Creating...' : 'Register Learner'}
                 </button>
@@ -888,7 +1166,7 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
                 <h3 className="font-extrabold text-base tracking-tight">
                   Bulk Learner Registration (Excel / CSV)
                 </h3>
-                <p className="text-blue-100 text-xs">
+                <p className="text-blue-100 text-sm">
                   Upload spreadsheet with preview, validation, and duplicate detection
                 </p>
               </div>
@@ -902,13 +1180,13 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
 
             <div className="p-6 space-y-5 flex-1 overflow-y-auto">
               {bulkError && (
-                <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-800">
+                <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-sm text-rose-800">
                   {bulkError}
                 </div>
               )}
 
               {bulkSuccessMessage && (
-                <div className="p-3.5 bg-emerald-50 border border-emerald-200 rounded-xl text-xs text-emerald-800 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                <div className="p-3.5 bg-emerald-50 border border-emerald-200 rounded-xl text-sm text-emerald-800 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
                   <div className="flex items-center space-x-2">
                     <CheckCircle className="w-4 h-4 text-emerald-600 shrink-0" />
                     <span>{bulkSuccessMessage}</span>
@@ -924,7 +1202,7 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
                           newPasswordMap
                         );
                       }}
-                      className="py-1.5 px-3 bg-slate-900 hover:bg-slate-800 text-white font-bold rounded-lg text-[11px] flex items-center space-x-1.5 shrink-0 transition"
+                      className="py-1.5 px-3 bg-slate-900 hover:bg-slate-800 text-white font-bold rounded-lg text-xs flex items-center space-x-1.5 shrink-0 transition"
                     >
                       <Printer className="w-3.5 h-3.5 text-amber-300" />
                       <span>Print Imported Slips (PDF)</span>
@@ -933,7 +1211,7 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
                 </div>
               )}
 
-              {/* Step 1: Cohort Selection & Official Template */}
+              {/* Step 1: Cohort, Class & Official Template */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
                   <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
@@ -941,8 +1219,13 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
                   </label>
                   <select
                     value={bulkCohortId}
-                    onChange={(e) => setBulkCohortId(e.target.value)}
-                    className="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-xs focus:ring-2 focus:ring-blue-600 outline-none"
+                    onChange={(e) => {
+                      const nextCohortId = e.target.value;
+                      setBulkCohortId(nextCohortId);
+                      const firstCls = cohortClasses.find((c) => c.cohortId === nextCohortId);
+                      setBulkClassId(firstCls?.id || '');
+                    }}
+                    className="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-sm focus:ring-2 focus:ring-blue-600 outline-none"
                   >
                     {cohorts.map((c) => (
                       <option key={c.id} value={c.id}>
@@ -959,13 +1242,61 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
                   <button
                     type="button"
                     onClick={downloadSampleLearnerTemplate}
-                    className="w-full py-2.5 px-3 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold flex items-center justify-center space-x-1.5 transition border border-slate-200"
+                    className="w-full py-2.5 px-3 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-sm font-bold flex items-center justify-center space-x-1.5 transition border border-slate-200"
                   >
-                    <Download className="w-3.5 h-3.5 text-blue-700" />
+                    <Download className="w-4 h-4 text-blue-700" />
                     <span>Download Excel Template (.xlsx)</span>
                   </button>
                 </div>
               </div>
+
+              {bulkCohortClasses.length > 0 && (
+                <div className="bg-blue-50/70 border border-blue-200 rounded-xl p-3.5 space-y-2">
+                  <div>
+                    <label className="block text-xs font-bold text-blue-950 uppercase tracking-wider mb-1">
+                      Join Level & Class (All Imported Learners Receive Courses & Timetable):
+                    </label>
+                    <select
+                      value={bulkClassId}
+                      onChange={(e) => setBulkClassId(e.target.value)}
+                      className="w-full p-2.5 bg-white border border-blue-300 rounded-xl text-sm font-semibold focus:ring-2 focus:ring-blue-600 outline-none"
+                    >
+                      {cohortLevels
+                        .filter((l) => l.cohortId === bulkCohortId)
+                        .map((lvl) => {
+                          const classesInLvl = bulkCohortClasses.filter((c) => c.levelId === lvl.id);
+                          if (classesInLvl.length === 0) return null;
+                          return (
+                            <optgroup key={lvl.id} label={lvl.name}>
+                              {classesInLvl.map((cls) => (
+                                <option key={cls.id} value={cls.id}>
+                                  {cls.name} ({cls.code}) {cls.gradeBand ? `• ${cls.gradeBand}` : ''}
+                                </option>
+                              ))}
+                            </optgroup>
+                          );
+                        })}
+                    </select>
+                  </div>
+
+                  {selectedBulkClass && (
+                    <div className="text-xs text-blue-900 space-y-1">
+                      <p className="font-bold">
+                        Included Courses ({selectedBulkClass.coursesOffered?.length || 0}):{' '}
+                        <span className="font-medium text-slate-700">
+                          {(selectedBulkClass.coursesOffered || []).map((c) => c.title).join(', ') || 'Cohort curriculum'}
+                        </span>
+                      </p>
+                      <p className="font-medium flex items-center space-x-1">
+                        <CalendarDays className="w-3.5 h-3.5 text-emerald-700" />
+                        <span>
+                          Timetable linked: {bulkClassTimetable.length} scheduled weeks
+                        </span>
+                      </p>
+                    </div>
+                  )}
+                </div>
+              )}
 
               {/* Step 2: File Upload */}
               <div className="border-2 border-dashed border-slate-300 hover:border-blue-500 rounded-2xl p-6 text-center cursor-pointer bg-slate-50">
@@ -978,10 +1309,10 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
                 />
                 <label htmlFor="excelFileInput" className="cursor-pointer space-y-2 block">
                   <FileSpreadsheet className="w-10 h-10 text-blue-600 mx-auto" />
-                  <p className="text-xs font-bold text-slate-800">
+                  <p className="text-sm font-bold text-slate-800">
                     {bulkFile ? bulkFile.name : 'Click to select spreadsheet (.xlsx or .csv)'}
                   </p>
-                  <p className="text-[11px] text-slate-500">
+                  <p className="text-xs text-slate-500">
                     Columns: Full Name (required), School Name, Grade, Learner ID, Gender, Age, Guardian Contact
                   </p>
                 </label>
@@ -990,7 +1321,7 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
               {/* Step 3: Validation Preview Table */}
               {parsedRows.length > 0 && (
                 <div className="space-y-2">
-                  <div className="flex justify-between items-center text-xs">
+                  <div className="flex justify-between items-center text-sm">
                     <span className="font-bold text-slate-700">
                       Import Preview: {parsedRows.filter((r) => r.isValid).length} Valid •{' '}
                       {parsedRows.filter((r) => !r.isValid).length} Errors
@@ -998,14 +1329,14 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
                   </div>
 
                   <div className="max-h-56 overflow-y-auto border border-slate-200 rounded-xl">
-                    <table className="w-full text-left text-xs">
-                      <thead className="bg-slate-100 border-b border-slate-200 text-slate-600 font-bold sticky top-0">
+                    <table className="w-full text-left text-sm">
+                      <thead className="bg-slate-100 border-b border-slate-200 text-slate-600 text-xs uppercase tracking-wider font-bold sticky top-0">
                         <tr>
-                          <th className="py-2 px-3">#</th>
-                          <th className="py-2 px-3">Learner Name</th>
-                          <th className="py-2 px-3">School & Grade</th>
-                          <th className="py-2 px-3">ID / Code</th>
-                          <th className="py-2 px-3">Validation Status</th>
+                          <th className="py-2.5 px-3">#</th>
+                          <th className="py-2.5 px-3">Learner Name</th>
+                          <th className="py-2.5 px-3">School & Grade</th>
+                          <th className="py-2.5 px-3">ID / Code</th>
+                          <th className="py-2.5 px-3">Validation Status</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-100">
@@ -1014,16 +1345,16 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
                             key={idx}
                             className={row.isValid ? 'bg-white' : 'bg-rose-50/50'}
                           >
-                            <td className="py-2 px-3 text-slate-400">{idx + 1}</td>
-                            <td className="py-2 px-3 font-bold text-slate-900">{row.fullName}</td>
-                            <td className="py-2 px-3 text-slate-600">
-                              <span className="block font-semibold text-[11px]">{row.schoolName || 'Sangurur Comprehensive School'}</span>
+                            <td className="py-2.5 px-3 text-slate-400">{idx + 1}</td>
+                            <td className="py-2.5 px-3 font-bold text-slate-900">{row.fullName}</td>
+                            <td className="py-2.5 px-3 text-slate-600">
+                              <span className="block font-semibold text-xs">{row.schoolName || 'Sangurur Comprehensive School'}</span>
                               {row.grade && (
-                                <span className="text-[10px] text-emerald-700 font-bold">{row.grade}</span>
+                                <span className="text-xs text-emerald-700 font-bold">{row.grade}</span>
                               )}
                             </td>
-                            <td className="py-2 px-3 font-mono text-slate-600">{row.learnerId || '(Auto)'}</td>
-                            <td className="py-2 px-3">
+                            <td className="py-2.5 px-3 font-mono text-xs text-slate-600">{row.learnerId || '(Auto)'}</td>
+                            <td className="py-2.5 px-3 text-xs">
                               {row.isValid ? (
                                 <span className="text-emerald-700 font-semibold flex items-center space-x-1">
                                   <Check className="w-3.5 h-3.5" />
@@ -1048,7 +1379,7 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
               <button
                 type="button"
                 onClick={() => setShowBulkModal(false)}
-                className="py-2 px-4 text-xs text-slate-600 font-semibold"
+                className="py-2 px-4 text-sm text-slate-600 font-semibold"
               >
                 Close
               </button>
@@ -1057,7 +1388,7 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
                 type="button"
                 disabled={bulkSubmitting || parsedRows.filter((r) => r.isValid).length === 0}
                 onClick={handleBulkSubmit}
-                className="py-2.5 px-6 bg-blue-700 hover:bg-blue-800 disabled:opacity-50 text-white font-bold rounded-xl text-xs shadow-md transition"
+                className="py-2.5 px-6 bg-blue-700 hover:bg-blue-800 disabled:opacity-50 text-white font-bold rounded-xl text-sm shadow-md transition"
               >
                 {bulkSubmitting
                   ? 'Importing Learners...'
@@ -1077,46 +1408,55 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
             </div>
 
             <div>
-              <span className="text-[10px] uppercase font-black tracking-widest text-emerald-800 bg-emerald-100/70 px-2.5 py-0.5 rounded-full inline-block mb-1.5">
+              <span className="text-xs uppercase font-black tracking-widest text-emerald-800 bg-emerald-100/70 px-2.5 py-0.5 rounded-full inline-block mb-1.5">
                 Learner Registered Successfully
               </span>
               <h3 className="text-lg font-black text-slate-900">
                 Official Digital ID Generated
               </h3>
-              <p className="text-xs text-slate-500 mt-1">
+              <p className="text-sm text-slate-500 mt-1">
                 Student: <strong className="text-slate-800">{newlyCreatedSlip.learner.fullName}</strong>
               </p>
             </div>
 
             <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 text-left space-y-3">
               <div className="flex justify-between items-center pb-2 border-b border-slate-200">
-                <span className="text-xs text-slate-500 font-semibold">Digital ID (Username):</span>
+                <span className="text-sm text-slate-500 font-semibold">Digital ID (Username):</span>
                 <span className="text-sm font-mono font-black text-blue-900 bg-blue-50 px-2 py-0.5 rounded border border-blue-200">
                   {newlyCreatedSlip.learner.digitalId || newlyCreatedSlip.learner.learnerId}
                 </span>
               </div>
 
               <div className="flex justify-between items-center pb-2 border-b border-slate-200">
-                <span className="text-xs text-slate-500 font-semibold">Initial Default Password:</span>
+                <span className="text-sm text-slate-500 font-semibold">Initial Default Password:</span>
                 <span className="text-sm font-mono font-black text-rose-700 bg-rose-50 px-2 py-0.5 rounded border border-rose-200">
                   {newlyCreatedSlip.initialPassword}
                 </span>
               </div>
 
-              <div className="flex justify-between items-center text-xs">
+              <div className="flex justify-between items-center text-sm">
                 <span className="text-slate-500 font-semibold">Assigned Cohort:</span>
                 <span className="font-bold text-slate-800">{newlyCreatedSlip.cohortName}</span>
               </div>
 
-              <div className="flex justify-between items-center text-xs">
+              {(newlyCreatedSlip.levelName || newlyCreatedSlip.className) && (
+                <div className="flex justify-between items-center text-sm">
+                  <span className="text-slate-500 font-semibold">Level & Class:</span>
+                  <span className="font-bold text-emerald-800">
+                    {[newlyCreatedSlip.levelName, newlyCreatedSlip.className].filter(Boolean).join(' → ')}
+                  </span>
+                </div>
+              )}
+
+              <div className="flex justify-between items-center text-sm">
                 <span className="text-slate-500 font-semibold">Account Status:</span>
-                <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 font-bold text-[10px]">
+                <span className="px-2.5 py-0.5 rounded-full bg-emerald-100 text-emerald-800 font-bold text-xs">
                   ACTIVE (Must Change Password)
                 </span>
               </div>
             </div>
 
-            <p className="text-[11px] text-slate-500 text-left bg-amber-50 p-3 rounded-xl border border-amber-200 text-amber-900">
+            <p className="text-xs text-left bg-amber-50 p-3 rounded-xl border border-amber-200 text-amber-900">
               <strong>Mandatory Protocol:</strong> Upon first login with this Digital ID and default password (123456789), the learner will be blocked from the register until they configure their own private password.
             </p>
 
@@ -1129,7 +1469,7 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
                     newlyCreatedSlip.initialPassword
                   );
                 }}
-                className="w-full py-2.5 bg-blue-700 hover:bg-blue-800 text-white font-bold rounded-xl text-xs flex items-center justify-center space-x-2 shadow-md transition"
+                className="w-full py-2.5 bg-blue-700 hover:bg-blue-800 text-white font-bold rounded-xl text-sm flex items-center justify-center space-x-2 shadow-md transition"
               >
                 <Printer className="w-4 h-4 text-amber-300" />
                 <span>Print Official Login Slip (PDF)</span>
@@ -1137,7 +1477,7 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
 
               <button
                 onClick={() => setNewlyCreatedSlip(null)}
-                className="w-full py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl text-xs transition"
+                className="w-full py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl text-sm transition"
               >
                 Close & Return
               </button>
@@ -1155,25 +1495,25 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
             </div>
 
             <div>
-              <span className="text-[10px] uppercase font-black tracking-widest text-emerald-800 bg-emerald-100/70 px-2.5 py-0.5 rounded-full inline-block mb-1.5">
+              <span className="text-xs uppercase font-black tracking-widest text-emerald-800 bg-emerald-100/70 px-2.5 py-0.5 rounded-full inline-block mb-1.5">
                 Authorised Password Reset
               </span>
               <h3 className="text-base font-black text-slate-900">
                 Password Reset to Default
               </h3>
-              <p className="text-xs text-slate-500 mt-1">
+              <p className="text-sm text-slate-500 mt-1">
                 Learner: <strong className="text-slate-800">{resetSuccessModal.learnerName}</strong>
               </p>
             </div>
 
             <div className="bg-slate-50 p-3.5 rounded-xl border border-slate-200 text-left space-y-2.5">
-              <div className="flex justify-between items-center text-xs pb-1.5 border-b border-slate-200">
+              <div className="flex justify-between items-center text-sm pb-1.5 border-b border-slate-200">
                 <span className="text-slate-500 font-semibold">Digital ID:</span>
                 <span className="font-mono font-bold text-blue-900 bg-blue-50 px-2 py-0.5 rounded">
                   {resetSuccessModal.digitalId}
                 </span>
               </div>
-              <div className="flex justify-between items-center text-xs">
+              <div className="flex justify-between items-center text-sm">
                 <span className="text-slate-500 font-semibold">Default Password:</span>
                 <span className="font-mono font-black text-emerald-800 text-sm">
                   {resetSuccessModal.newInitialPassword}
@@ -1181,7 +1521,7 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
               </div>
             </div>
 
-            <p className="text-[11px] text-slate-500">
+            <p className="text-xs text-slate-500">
               The learner must change this default password upon their next login. This action has been recorded in the institution audit log.
             </p>
 
@@ -1194,7 +1534,7 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
                     resetSuccessModal.newInitialPassword
                   );
                 }}
-                className="w-full py-2.5 bg-blue-700 hover:bg-blue-800 text-white font-bold rounded-xl text-xs flex items-center justify-center space-x-2 shadow-md transition"
+                className="w-full py-2.5 bg-blue-700 hover:bg-blue-800 text-white font-bold rounded-xl text-sm flex items-center justify-center space-x-2 shadow-md transition"
               >
                 <Printer className="w-4 h-4 text-amber-300" />
                 <span>Print Official Login Slip (PDF)</span>
@@ -1202,7 +1542,7 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
 
               <button
                 onClick={() => setResetSuccessModal(null)}
-                className="w-full py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl text-xs transition"
+                className="w-full py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl text-sm transition"
               >
                 Done & Return
               </button>
@@ -1220,14 +1560,14 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
                 <KeyRound className="w-5 h-5" />
               </div>
               <div>
-                <h3 className="text-sm font-black text-slate-900">
+                <h3 className="text-base font-black text-slate-900">
                   Confirm Password Reset
                 </h3>
-                <p className="text-xs text-slate-600 mt-1">
+                <p className="text-sm text-slate-600 mt-1">
                   Reset password for <strong>{confirmResetTarget.fullName}</strong> (
                   <span className="font-mono">{confirmResetTarget.digitalId || confirmResetTarget.learnerId}</span>) back to default <code className="font-mono font-bold">123456789</code>?
                 </p>
-                <p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-2 mt-2">
+                <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-2.5 mt-2">
                   The learner will be required to set a new personal password immediately upon their next login, and this reset will be logged in the audit trail.
                 </p>
               </div>
@@ -1238,7 +1578,7 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
                 type="button"
                 onClick={() => setConfirmResetTarget(null)}
                 disabled={resettingId === confirmResetTarget.id}
-                className="py-2 px-4 text-xs text-slate-600 font-semibold hover:bg-slate-100 rounded-xl transition"
+                className="py-2 px-4 text-sm text-slate-600 font-semibold hover:bg-slate-100 rounded-xl transition"
               >
                 Cancel
               </button>
@@ -1246,7 +1586,7 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
                 type="button"
                 onClick={() => executeResetPassword(confirmResetTarget)}
                 disabled={resettingId === confirmResetTarget.id}
-                className="py-2 px-4 bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white font-bold rounded-xl text-xs transition shadow-xs"
+                className="py-2 px-4 bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white font-bold rounded-xl text-sm transition shadow-xs"
               >
                 {resettingId === confirmResetTarget.id ? 'Resetting...' : 'Reset to 123456789'}
               </button>

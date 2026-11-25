@@ -56,26 +56,26 @@ export const FirstLoginModal: React.FC<FirstLoginModalProps> = ({ onSuccess }) =
           <h3 className="font-black text-lg tracking-tight">
             Mandatory Security Setup
           </h3>
-          <p className="text-emerald-100 text-xs mt-0.5">
+          <p className="text-emerald-100 text-sm mt-0.5">
             Sangurur Comprehensive School • SDLR
           </p>
         </div>
 
         <form onSubmit={handleSubmit} className="p-6 space-y-4">
-          <div className="bg-amber-50 border border-amber-200 rounded-2xl p-3.5 text-xs text-amber-950 space-y-1">
+          <div className="bg-amber-50 border border-amber-200 rounded-2xl p-3.5 text-sm text-amber-950 space-y-1">
             <div className="flex justify-between items-center font-bold">
               <span>Learner: {learnerProfile?.fullName}</span>
-              <span className="font-mono text-emerald-800 bg-emerald-100 px-2 py-0.5 rounded-md">
+              <span className="font-mono text-xs text-emerald-800 bg-emerald-100 px-2 py-0.5 rounded-md">
                 {digitalId}
               </span>
             </div>
-            <p className="text-slate-600 text-[11px] leading-relaxed">
+            <p className="text-slate-600 text-xs leading-relaxed">
               School policy requires all learners to replace the default password (<code className="font-bold">123456789</code>) with a private password before accessing the digital register.
             </p>
           </div>
 
           {error && (
-            <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-800 flex items-start space-x-2">
+            <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-sm text-rose-800 flex items-start space-x-2">
               <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
               <span>{error}</span>
             </div>
@@ -124,14 +124,14 @@ export const FirstLoginModal: React.FC<FirstLoginModalProps> = ({ onSuccess }) =
             <button
               type="submit"
               disabled={saving}
-              className="w-full py-3.5 px-4 bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 text-white font-extrabold rounded-xl shadow-lg transition-all flex items-center justify-center space-x-2 text-sm"
+              className="w-full py-3.5 px-4 bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 text-white font-extrabold rounded-xl shadow-lg transition-all flex items-center justify-center space-x-2 text-base"
             >
               <span>{saving ? 'Saving Security Credentials...' : 'Save Password & Select Cohort'}</span>
               <ArrowRight className="w-4 h-4" />
             </button>
           </div>
 
-          <p className="text-[11px] text-center text-slate-400">
+          <p className="text-xs text-center text-slate-400">
             * The default password (123456789) will become permanently invalid.
           </p>
         </form>

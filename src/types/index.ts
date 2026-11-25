@@ -24,6 +24,11 @@ export interface Learner {
   grade?: string;
   guardianContact?: string;
   assignedCohortIds: string[];
+  assignedClassIds?: string[];
+  levelId?: string | null;
+  levelName?: string | null;
+  classId?: string | null;
+  className?: string | null;
   mustChangePassword: boolean;
   isFirstLogin: boolean;
   status: 'ACTIVE' | 'INACTIVE' | 'ARCHIVED';
@@ -31,6 +36,51 @@ export interface Learner {
   createdAt: string;
   updatedAt?: string;
   initialPassword?: string; // transient for printable access slip
+}
+
+export interface CourseOffered {
+  id: string;
+  title: string;
+  code?: string;
+  category?: string;
+  description?: string;
+  hoursPerWeek?: string;
+  curriculumId?: string;
+}
+
+export interface CohortLevel {
+  id: string;
+  cohortId: string;
+  name: string; // e.g., "August Holiday Bootcamp Training"
+  code?: string;
+  description?: string;
+  termOrSeason?: string;
+  startDate?: string;
+  endDate?: string;
+  status: 'active' | 'archived';
+  createdBy: string;
+  createdAt: string;
+  updatedAt?: string;
+}
+
+export interface CohortClass {
+  id: string;
+  cohortId: string;
+  levelId: string;
+  levelName: string;
+  name: string; // e.g., "Lower Primary", "Upper Primary", "Junior School", "Senior School"
+  code: string;
+  description?: string;
+  gradeBand?: string;
+  ageBracket?: string;
+  teacherId?: string;
+  teacherName?: string;
+  curriculumId?: string;
+  curriculumSnapshot?: CurriculumSnapshot;
+  coursesOffered: CourseOffered[];
+  status: 'active' | 'archived';
+  createdAt: string;
+  updatedAt?: string;
 }
 
 export interface Cohort {
@@ -59,6 +109,10 @@ export interface CohortMember {
   learnerId: string;
   learnerName: string;
   learnerCode: string;
+  levelId?: string;
+  levelName?: string;
+  classId?: string;
+  className?: string;
   joinedAt: string;
   status: 'active' | 'transferred' | 'completed';
 }
@@ -137,6 +191,10 @@ export interface DailyRegister {
   id: string; // Deterministic: reg_{cohortId}_{learnerDocId}_{date}
   cohortId: string;
   cohortCode: string;
+  levelId?: string | null;
+  levelName?: string | null;
+  classId?: string | null;
+  className?: string | null;
   learnerDocId: string;
   learnerId: string;
   learnerName: string;
@@ -218,6 +276,10 @@ export interface WeeklyTimetableEntry {
   id: string;
   cohortId: string;
   cohortCode: string;
+  levelId?: string;
+  levelName?: string;
+  classId?: string;
+  className?: string;
   programmeTerm: string;
   weekNumber: number;
   weekLabel: string;
@@ -229,6 +291,58 @@ export interface WeeklyTimetableEntry {
   createdAt: string;
   updatedAt?: string;
 }
+
+export interface ClassPresetMeta {
+  key: string;
+  name: string;
+  shortCode: string;
+  gradeBand: string;
+  ageBracket: string;
+  defaultGrade: string;
+}
+
+export const CLASS_LEVEL_PRESETS: ClassPresetMeta[] = [
+  {
+    key: 'lower_primary',
+    name: 'Lower Primary',
+    shortCode: 'LP',
+    gradeBand: 'Grade 1 – Grade 3',
+    ageBracket: '6–9 Years (Lower Primary: Grade 1–3)',
+    defaultGrade: 'Grade 2',
+  },
+  {
+    key: 'upper_primary',
+    name: 'Upper Primary',
+    shortCode: 'UP',
+    gradeBand: 'Grade 4 – Grade 6',
+    ageBracket: '10–12 Years (Upper Primary: Grade 4–6)',
+    defaultGrade: 'Grade 5',
+  },
+  {
+    key: 'junior_school',
+    name: 'Junior School',
+    shortCode: 'JS',
+    gradeBand: 'Grade 7 – Grade 9',
+    ageBracket: '13–15 Years (Junior School: Grade 7–9)',
+    defaultGrade: 'Grade 7',
+  },
+  {
+    key: 'senior_school',
+    name: 'Senior School',
+    shortCode: 'SS',
+    gradeBand: 'Grade 10 – 12 / Form 1 – 4',
+    ageBracket: '16–18 Years (Senior School: Grade 10–12 / Form 1–4)',
+    defaultGrade: 'Form 1',
+  },
+  {
+    key: 'playgroup',
+    name: 'Play Group',
+    shortCode: 'PG',
+    gradeBand: 'Playgroup, PP1 – PP2',
+    ageBracket: '3–5 Years (Play Group / PP1–PP2)',
+    defaultGrade: 'PP1',
+  },
+];
 
 export type EducationLevelKey =
   | 'playgroup'

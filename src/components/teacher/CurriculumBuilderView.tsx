@@ -324,7 +324,7 @@ export const CurriculumBuilderView: React.FC<CurriculumBuilderViewProps> = ({
               Curriculum Builder & Designer (v{version})
             </span>
             {isEditingTemplateCopy && (
-              <span className="px-2 py-0.5 text-[11px] font-bold rounded-full bg-blue-100 text-blue-800">
+              <span className="px-2 py-0.5 text-xs font-bold rounded-full bg-blue-100 text-blue-800">
                 Cloned from Official Template
               </span>
             )}
@@ -332,7 +332,7 @@ export const CurriculumBuilderView: React.FC<CurriculumBuilderViewProps> = ({
           <h2 className="text-xl font-extrabold text-slate-900 tracking-tight mt-1">
             Design Learning Areas, Modules & Topics
           </h2>
-          <p className="text-xs text-slate-500">
+          <p className="text-sm text-slate-500">
             Hierarchical structure: Curriculum → Learning Areas → Modules → Topics → Practical Activities.
           </p>
         </div>
@@ -342,9 +342,9 @@ export const CurriculumBuilderView: React.FC<CurriculumBuilderViewProps> = ({
             <button
               onClick={() => handleSave(true)}
               disabled={saving}
-              className="py-2 px-3.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl text-xs flex items-center space-x-1.5 transition border border-slate-200"
+              className="py-2 px-3.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl text-sm flex items-center space-x-1.5 transition border border-slate-200"
             >
-              <Copy className="w-3.5 h-3.5 text-blue-700" />
+              <Copy className="w-4 h-4 text-blue-700" />
               <span>Save As New Copy</span>
             </button>
           )}
@@ -352,23 +352,23 @@ export const CurriculumBuilderView: React.FC<CurriculumBuilderViewProps> = ({
           <button
             onClick={() => handleSave(false)}
             disabled={saving}
-            className="py-2 px-4 bg-emerald-700 hover:bg-emerald-800 text-white font-bold rounded-xl text-xs flex items-center space-x-1.5 transition shadow-xs"
+            className="py-2 px-4 bg-emerald-700 hover:bg-emerald-800 text-white font-bold rounded-xl text-sm flex items-center space-x-1.5 transition shadow-xs"
           >
-            <Save className="w-3.5 h-3.5" />
+            <Save className="w-4 h-4" />
             <span>{saving ? 'Saving...' : isPublished ? 'Save & Publish Curriculum' : 'Save Draft'}</span>
           </button>
         </div>
       </div>
 
       {errorMessage && (
-        <div className="p-3.5 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-800 flex items-center space-x-2">
+        <div className="p-3.5 bg-rose-50 border border-rose-200 rounded-xl text-sm text-rose-800 flex items-center space-x-2">
           <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
           <span>{errorMessage}</span>
         </div>
       )}
 
       {successMessage && (
-        <div className="p-3.5 bg-emerald-50 border border-emerald-200 rounded-xl text-xs text-emerald-800 flex items-center space-x-2">
+        <div className="p-3.5 bg-emerald-50 border border-emerald-200 rounded-xl text-sm text-emerald-800 flex items-center space-x-2">
           <CheckCircle className="w-4 h-4 text-emerald-600 shrink-0" />
           <span>{successMessage}</span>
         </div>
@@ -377,10 +377,10 @@ export const CurriculumBuilderView: React.FC<CurriculumBuilderViewProps> = ({
       {/* Curriculum Metadata Form */}
       <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-xs space-y-4">
         <div className="flex items-center justify-between">
-          <h3 className="text-xs font-bold uppercase tracking-wider text-slate-600">
+          <h3 className="text-sm font-bold uppercase tracking-wider text-slate-600">
             Curriculum Overview & Classification
           </h3>
-          <label className="inline-flex items-center space-x-2 text-xs font-semibold text-slate-700 cursor-pointer">
+          <label className="inline-flex items-center space-x-2 text-sm font-semibold text-slate-700 cursor-pointer">
             <input
               type="checkbox"
               checked={isPublished}
@@ -393,7 +393,7 @@ export const CurriculumBuilderView: React.FC<CurriculumBuilderViewProps> = ({
 
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           <div className="sm:col-span-2">
-            <label className="block text-xs font-bold text-slate-700 mb-1">
+            <label className="block text-sm font-bold text-slate-700 mb-1">
               Curriculum Title *
             </label>
             <input
@@ -401,45 +401,45 @@ export const CurriculumBuilderView: React.FC<CurriculumBuilderViewProps> = ({
               required
               value={title}
               onChange={(e) => setTitle(e.target.value)}
-              className="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-xs font-bold text-slate-900 focus:ring-2 focus:ring-emerald-600 outline-none"
+              className="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-sm font-bold text-slate-900 focus:ring-2 focus:ring-emerald-600 outline-none"
             />
           </div>
 
           <div>
-            <label className="block text-xs font-bold text-slate-700 mb-1">
+            <label className="block text-sm font-bold text-slate-700 mb-1">
               Category
             </label>
             <input
               type="text"
               value={category}
               onChange={(e) => setCategory(e.target.value)}
-              className="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-xs focus:ring-2 focus:ring-emerald-600 outline-none"
+              className="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-sm focus:ring-2 focus:ring-emerald-600 outline-none"
             />
           </div>
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           <div className="sm:col-span-2">
-            <label className="block text-xs font-bold text-slate-700 mb-1">
+            <label className="block text-sm font-bold text-slate-700 mb-1">
               Curriculum Description
             </label>
             <textarea
               rows={2}
               value={description}
               onChange={(e) => setDescription(e.target.value)}
-              className="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-xs focus:ring-2 focus:ring-emerald-600 outline-none"
+              className="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-sm focus:ring-2 focus:ring-emerald-600 outline-none"
             />
           </div>
 
           <div>
-            <label className="block text-xs font-bold text-slate-700 mb-1">
+            <label className="block text-sm font-bold text-slate-700 mb-1">
               Target Level / Grade
             </label>
             <input
               type="text"
               value={level}
               onChange={(e) => setLevel(e.target.value)}
-              className="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-xs focus:ring-2 focus:ring-emerald-600 outline-none"
+              className="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-sm focus:ring-2 focus:ring-emerald-600 outline-none"
             />
           </div>
         </div>
@@ -448,7 +448,7 @@ export const CurriculumBuilderView: React.FC<CurriculumBuilderViewProps> = ({
       {/* Curriculum Hierarchy Builder */}
       <div className="space-y-4">
         <div className="flex items-center justify-between">
-          <h3 className="text-sm font-extrabold text-slate-900 flex items-center space-x-2">
+          <h3 className="text-base font-extrabold text-slate-900 flex items-center space-x-2">
             <Layers className="w-4 h-4 text-emerald-700" />
             <span>Curriculum Hierarchy (Learning Areas & Modules)</span>
           </h3>
@@ -456,9 +456,9 @@ export const CurriculumBuilderView: React.FC<CurriculumBuilderViewProps> = ({
           <button
             type="button"
             onClick={addLearningArea}
-            className="py-1.5 px-3 bg-emerald-700 hover:bg-emerald-800 text-white rounded-xl text-xs font-bold flex items-center space-x-1 shadow-xs transition"
+            className="py-2 px-3.5 bg-emerald-700 hover:bg-emerald-800 text-white rounded-xl text-sm font-bold flex items-center space-x-1 shadow-xs transition"
           >
-            <Plus className="w-3.5 h-3.5" />
+            <Plus className="w-4 h-4" />
             <span>Add Learning Area</span>
           </button>
         </div>
@@ -483,7 +483,7 @@ export const CurriculumBuilderView: React.FC<CurriculumBuilderViewProps> = ({
                       updated[aIndex].title = e.target.value;
                       setLearningAreas(updated);
                     }}
-                    className="font-extrabold text-slate-900 text-sm bg-transparent border-b border-dashed border-slate-300 focus:border-emerald-600 outline-none flex-1 py-0.5"
+                    className="font-extrabold text-slate-900 text-base bg-transparent border-b border-dashed border-slate-300 focus:border-emerald-600 outline-none flex-1 py-0.5"
                   />
                 </div>
                 <input
@@ -495,7 +495,7 @@ export const CurriculumBuilderView: React.FC<CurriculumBuilderViewProps> = ({
                     updated[aIndex].description = e.target.value;
                     setLearningAreas(updated);
                   }}
-                  className="w-full text-xs text-slate-500 bg-transparent border-b border-dashed border-slate-200 outline-none py-0.5"
+                  className="w-full text-sm text-slate-500 bg-transparent border-b border-dashed border-slate-200 outline-none py-0.5"
                 />
               </div>
 
@@ -521,7 +521,7 @@ export const CurriculumBuilderView: React.FC<CurriculumBuilderViewProps> = ({
                 <button
                   type="button"
                   onClick={() => addModule(area.id)}
-                  className="py-1 px-2.5 bg-blue-50 text-blue-700 hover:bg-blue-100 font-bold rounded-lg text-xs flex items-center space-x-1"
+                  className="py-1.5 px-2.5 bg-blue-50 text-blue-700 hover:bg-blue-100 font-bold rounded-lg text-xs flex items-center space-x-1"
                 >
                   <Plus className="w-3 h-3" />
                   <span>Add Module</span>
@@ -547,7 +547,7 @@ export const CurriculumBuilderView: React.FC<CurriculumBuilderViewProps> = ({
                   <div className="flex items-start justify-between gap-3">
                     <div className="flex-1 space-y-1">
                       <div className="flex items-center space-x-2">
-                        <span className="text-xs font-bold text-blue-800">
+                        <span className="text-sm font-bold text-blue-800">
                           Module {aIndex + 1}.{mIndex + 1}:
                         </span>
                         <input
@@ -558,7 +558,7 @@ export const CurriculumBuilderView: React.FC<CurriculumBuilderViewProps> = ({
                             updated[aIndex].modules[mIndex].title = e.target.value;
                             setLearningAreas(updated);
                           }}
-                          className="font-bold text-slate-900 text-xs bg-transparent border-b border-dashed border-slate-300 focus:border-blue-600 outline-none flex-1 py-0.5"
+                          className="font-bold text-slate-900 text-sm bg-transparent border-b border-dashed border-slate-300 focus:border-blue-600 outline-none flex-1 py-0.5"
                         />
                       </div>
                     </div>
@@ -571,7 +571,7 @@ export const CurriculumBuilderView: React.FC<CurriculumBuilderViewProps> = ({
                         className="p-1 text-slate-400 hover:text-slate-700 disabled:opacity-20"
                         title="Move Module Up"
                       >
-                        <ArrowUp className="w-3 h-3" />
+                        <ArrowUp className="w-3.5 h-3.5" />
                       </button>
                       <button
                         type="button"
@@ -580,12 +580,12 @@ export const CurriculumBuilderView: React.FC<CurriculumBuilderViewProps> = ({
                         className="p-1 text-slate-400 hover:text-slate-700 disabled:opacity-20"
                         title="Move Module Down"
                       >
-                        <ArrowDown className="w-3 h-3" />
+                        <ArrowDown className="w-3.5 h-3.5" />
                       </button>
                       <button
                         type="button"
                         onClick={() => addTopic(area.id, mod.id)}
-                        className="py-1 px-2 bg-emerald-100 hover:bg-emerald-200 text-emerald-800 font-bold rounded-md text-[11px] flex items-center space-x-1"
+                        className="py-1 px-2.5 bg-emerald-100 hover:bg-emerald-200 text-emerald-800 font-bold rounded-md text-xs flex items-center space-x-1"
                       >
                         <Plus className="w-3 h-3" />
                         <span>Add Topic</span>
@@ -618,7 +618,7 @@ export const CurriculumBuilderView: React.FC<CurriculumBuilderViewProps> = ({
                                 updated[aIndex].modules[mIndex].topics[tIndex].title = e.target.value;
                                 setLearningAreas(updated);
                               }}
-                              className="font-bold text-slate-900 text-xs w-full bg-transparent border-b border-slate-200 focus:border-emerald-600 outline-none py-0.5"
+                              className="font-bold text-slate-900 text-sm w-full bg-transparent border-b border-slate-200 focus:border-emerald-600 outline-none py-0.5"
                             />
                             <input
                               type="text"
@@ -629,7 +629,7 @@ export const CurriculumBuilderView: React.FC<CurriculumBuilderViewProps> = ({
                                 updated[aIndex].modules[mIndex].topics[tIndex].description = e.target.value;
                                 setLearningAreas(updated);
                               }}
-                              className="text-[11px] text-slate-500 w-full bg-transparent outline-none py-0.5"
+                              className="text-xs text-slate-500 w-full bg-transparent outline-none py-0.5"
                             />
                           </div>
 
@@ -641,7 +641,7 @@ export const CurriculumBuilderView: React.FC<CurriculumBuilderViewProps> = ({
                               className="p-1 text-slate-400 hover:text-slate-700 disabled:opacity-20"
                               title="Move Topic Up"
                             >
-                              <ArrowUp className="w-3 h-3" />
+                              <ArrowUp className="w-3.5 h-3.5" />
                             </button>
                             <button
                               type="button"
@@ -650,21 +650,21 @@ export const CurriculumBuilderView: React.FC<CurriculumBuilderViewProps> = ({
                               className="p-1 text-slate-400 hover:text-slate-700 disabled:opacity-20"
                               title="Move Topic Down"
                             >
-                              <ArrowDown className="w-3 h-3" />
+                              <ArrowDown className="w-3.5 h-3.5" />
                             </button>
                             <button
                               type="button"
                               onClick={() => removeTopic(area.id, mod.id, topic.id)}
                               className="p-1 text-slate-400 hover:text-red-700"
                             >
-                              <Trash2 className="w-3 h-3" />
+                              <Trash2 className="w-3.5 h-3.5" />
                             </button>
                           </div>
                         </div>
 
-                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-1 text-[11px]">
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-1 text-xs">
                           <div>
-                            <span className="text-slate-400 block font-medium">Duration:</span>
+                            <span className="text-slate-500 block font-medium mb-0.5">Duration:</span>
                             <input
                               type="text"
                               value={topic.expectedDuration}
@@ -673,11 +673,11 @@ export const CurriculumBuilderView: React.FC<CurriculumBuilderViewProps> = ({
                                 updated[aIndex].modules[mIndex].topics[tIndex].expectedDuration = e.target.value;
                                 setLearningAreas(updated);
                               }}
-                              className="w-full text-slate-700 bg-slate-50 p-1 rounded-md border border-slate-200 outline-none"
+                              className="w-full text-slate-700 bg-slate-50 p-1.5 rounded-md border border-slate-200 outline-none text-sm"
                             />
                           </div>
                           <div>
-                            <span className="text-slate-400 block font-medium">Practical Activity:</span>
+                            <span className="text-slate-500 block font-medium mb-0.5">Practical Activity:</span>
                             <input
                               type="text"
                               value={topic.practicalActivities || ''}
@@ -687,11 +687,11 @@ export const CurriculumBuilderView: React.FC<CurriculumBuilderViewProps> = ({
                                 updated[aIndex].modules[mIndex].topics[tIndex].practicalActivities = e.target.value;
                                 setLearningAreas(updated);
                               }}
-                              className="w-full text-slate-700 bg-slate-50 p-1 rounded-md border border-slate-200 outline-none"
+                              className="w-full text-slate-700 bg-slate-50 p-1.5 rounded-md border border-slate-200 outline-none text-sm"
                             />
                           </div>
                           <div>
-                            <span className="text-slate-400 block font-medium">Objectives (comma-separated):</span>
+                            <span className="text-slate-500 block font-medium mb-0.5">Objectives (comma-separated):</span>
                             <input
                               type="text"
                               value={(topic.learningObjectives || []).join(', ')}
@@ -704,7 +704,7 @@ export const CurriculumBuilderView: React.FC<CurriculumBuilderViewProps> = ({
                                   .filter(Boolean);
                                 setLearningAreas(updated);
                               }}
-                              className="w-full text-slate-700 bg-slate-50 p-1 rounded-md border border-slate-200 outline-none"
+                              className="w-full text-slate-700 bg-slate-50 p-1.5 rounded-md border border-slate-200 outline-none text-sm"
                             />
                           </div>
                         </div>

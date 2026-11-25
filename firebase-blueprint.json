@@ -49,6 +49,11 @@
         "grade": { "type": "string", "maxLength": 64 },
         "guardianContact": { "type": "string", "maxLength": 64 },
         "assignedCohortIds": { "type": "array" },
+        "assignedClassIds": { "type": "array" },
+        "levelId": { "type": "string", "maxLength": 128 },
+        "levelName": { "type": "string", "maxLength": 128 },
+        "classId": { "type": "string", "maxLength": 128 },
+        "className": { "type": "string", "maxLength": 128 },
         "isFirstLogin": { "type": "boolean" },
         "passwordHash": { "type": "string", "maxLength": 256 },
         "salt": { "type": "string", "maxLength": 128 },
@@ -58,6 +63,51 @@
         "updatedAt": { "type": "string" }
       },
       "required": ["fullName", "learnerId", "username"]
+    },
+    "CohortLevel": {
+      "title": "CohortLevel",
+      "description": "Programme level or training track inside a cohort (e.g. August Holiday Bootcamp Training)",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "cohortId": { "type": "string", "maxLength": 128 },
+        "name": { "type": "string", "maxLength": 128 },
+        "code": { "type": "string", "maxLength": 64 },
+        "description": { "type": "string", "maxLength": 512 },
+        "termOrSeason": { "type": "string", "maxLength": 64 },
+        "startDate": { "type": "string" },
+        "endDate": { "type": "string" },
+        "status": { "type": "string", "enum": ["active", "archived"] },
+        "createdBy": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["cohortId", "name", "status"]
+    },
+    "CohortClass": {
+      "title": "CohortClass",
+      "description": "Class inside a cohort level (e.g. Lower Primary, Upper Primary, Junior School, Senior School) with its courses offered and curriculum",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "cohortId": { "type": "string", "maxLength": 128 },
+        "levelId": { "type": "string", "maxLength": 128 },
+        "levelName": { "type": "string", "maxLength": 128 },
+        "name": { "type": "string", "maxLength": 128 },
+        "code": { "type": "string", "maxLength": 64 },
+        "description": { "type": "string", "maxLength": 512 },
+        "gradeBand": { "type": "string", "maxLength": 64 },
+        "ageBracket": { "type": "string", "maxLength": 64 },
+        "teacherId": { "type": "string", "maxLength": 128 },
+        "teacherName": { "type": "string", "maxLength": 128 },
+        "curriculumId": { "type": "string", "maxLength": 128 },
+        "curriculumSnapshot": { "type": "object" },
+        "coursesOffered": { "type": "array" },
+        "status": { "type": "string", "enum": ["active", "archived"] },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["cohortId", "levelId", "name", "code", "coursesOffered", "status"]
     },
     "Cohort": {
       "title": "Cohort",
@@ -93,6 +143,10 @@
         "learnerId": { "type": "string", "maxLength": 128 },
         "learnerName": { "type": "string", "maxLength": 128 },
         "learnerCode": { "type": "string", "maxLength": 64 },
+        "levelId": { "type": "string", "maxLength": 128 },
+        "levelName": { "type": "string", "maxLength": 128 },
+        "classId": { "type": "string", "maxLength": 128 },
+        "className": { "type": "string", "maxLength": 128 },
         "joinedAt": { "type": "string" },
         "status": { "type": "string", "enum": ["active", "transferred", "completed"] }
       },
@@ -126,6 +180,10 @@
         "id": { "type": "string", "maxLength": 128 },
         "cohortId": { "type": "string", "maxLength": 128 },
         "cohortCode": { "type": "string", "maxLength": 64 },
+        "levelId": { "type": "string", "maxLength": 128 },
+        "levelName": { "type": "string", "maxLength": 128 },
+        "classId": { "type": "string", "maxLength": 128 },
+        "className": { "type": "string", "maxLength": 128 },
         "learnerDocId": { "type": "string", "maxLength": 128 },
         "learnerId": { "type": "string", "maxLength": 64 },
         "learnerName": { "type": "string", "maxLength": 128 },
@@ -239,6 +297,10 @@
         "id": { "type": "string", "maxLength": 128 },
         "cohortId": { "type": "string", "maxLength": 128 },
         "cohortCode": { "type": "string", "maxLength": 64 },
+        "levelId": { "type": "string", "maxLength": 128 },
+        "levelName": { "type": "string", "maxLength": 128 },
+        "classId": { "type": "string", "maxLength": 128 },
+        "className": { "type": "string", "maxLength": 128 },
         "programmeTerm": { "type": "string", "maxLength": 128 },
         "weekNumber": { "type": "number" },
         "weekLabel": { "type": "string", "maxLength": 128 },
@@ -304,7 +366,15 @@
     },
     "/weeklyTimetables/{entryId}": {
       "schema": "WeeklyTimetable",
-      "description": "Weekly timetable schedules organized by programme/term and week number"
+      "description": "Weekly timetable schedules organized by programme/term, class, and week number"
+    },
+    "/cohortLevels/{levelId}": {
+      "schema": "CohortLevel",
+      "description": "Levels inside cohorts (e.g. August Holiday Bootcamp Training)"
+    },
+    "/cohortClasses/{classId}": {
+      "schema": "CohortClass",
+      "description": "Classes inside cohort levels (e.g. Lower Primary, Upper Primary, Junior School, Senior School) with courses offered"
     }
   }
 }

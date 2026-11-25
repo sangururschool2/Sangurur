@@ -19,6 +19,8 @@ import { WeeklyTimetableView } from './components/teacher/WeeklyTimetableView';
 
 import {
   getCohorts,
+  getCohortLevels,
+  getCohortClasses,
   getLearners,
   getCurricula,
   getDailyRegisters,
@@ -26,7 +28,15 @@ import {
   getTeachers,
   purgeLegacyDemoRecordsIfAdmin,
 } from './services/dataService';
-import { Cohort, Learner, Curriculum, DailyRegister, Teacher } from './types';
+import {
+  Cohort,
+  CohortLevel,
+  CohortClass,
+  Learner,
+  Curriculum,
+  DailyRegister,
+  Teacher,
+} from './types';
 import { School, Loader2 } from 'lucide-react';
 
 const MainApplication: React.FC = () => {
@@ -38,6 +48,8 @@ const MainApplication: React.FC = () => {
 
   // Shared application state
   const [cohorts, setCohorts] = useState<Cohort[]>([]);
+  const [cohortLevels, setCohortLevels] = useState<CohortLevel[]>([]);
+  const [cohortClasses, setCohortClasses] = useState<CohortClass[]>([]);
   const [learners, setLearners] = useState<Learner[]>([]);
   const [curricula, setCurricula] = useState<Curriculum[]>([]);
   const [registers, setRegisters] = useState<DailyRegister[]>([]);
@@ -79,9 +91,12 @@ const MainApplication: React.FC = () => {
       ]);
 
       const scopedCohortIds = scopedCohorts.map((c) => c.id);
-      const regData = await getDailyRegisters(
-        hasSchoolWideAccess ? undefined : { cohortIds: scopedCohortIds }
-      );
+      const cohortScopeFilter = hasSchoolWideAccess ? undefined : { cohortIds: scopedCohortIds };
+      const [regData, levelData, classData] = await Promise.all([
+        getDailyRegisters(cohortScopeFilter),
+        getCohortLevels(cohortScopeFilter),
+        getCohortClasses(cohortScopeFilter),
+      ]);
 
       const scopedCohortIdSet = new Set(scopedCohortIds);
       const scopedLearners = hasSchoolWideAccess
@@ -92,6 +107,8 @@ const MainApplication: React.FC = () => {
         : regData.filter((r) => scopedCohortIdSet.has(r.cohortId));
 
       setCohorts(scopedCohorts);
+      setCohortLevels(levelData);
+      setCohortClasses(classData);
       setLearners(scopedLearners);
       setCurricula(currData);
       setRegisters(scopedRegisters);
@@ -116,13 +133,13 @@ const MainApplication: React.FC = () => {
         <div className="w-14 h-14 rounded-2xl bg-emerald-700 text-white flex items-center justify-center shadow-lg ring-4 ring-emerald-600/20 mb-4 animate-pulse">
           <School className="w-8 h-8" />
         </div>
-        <h2 className="text-base font-extrabold text-slate-900 tracking-tight">
+        <h2 className="text-lg font-extrabold text-slate-900 tracking-tight">
           SANGURUR COMPREHENSIVE SCHOOL
         </h2>
-        <p className="text-xs font-semibold text-emerald-700 uppercase tracking-wider mt-0.5">
+        <p className="text-sm font-semibold text-emerald-700 uppercase tracking-wider mt-0.5">
           Think, Code, Change the World
         </p>
-        <div className="flex items-center space-x-2 text-xs text-slate-500 mt-4">
+        <div className="flex items-center space-x-2 text-sm text-slate-500 mt-4">
           <Loader2 className="w-4 h-4 animate-spin text-emerald-600" />
           <span>Loading SDLR System...</span>
         </div>
@@ -210,13 +227,15 @@ const MainApplication: React.FC = () => {
           {dataLoading && cohorts.length === 0 ? (
             <div className="py-16 flex flex-col items-center justify-center text-slate-500 space-y-2">
               <Loader2 className="w-7 h-7 animate-spin text-emerald-600" />
-              <span className="text-xs font-semibold">Loading cohort records...</span>
+              <span className="text-sm font-semibold">Loading cohort records...</span>
             </div>
           ) : (
             <>
               {currentTab === 'dashboard' && (
                 <TeacherDashboard
                   cohorts={cohorts}
+                  cohortLevels={cohortLevels}
+                  cohortClasses={cohortClasses}
                   learners={learners}
                   registers={registers}
                   onNavigate={(tab) => setCurrentTab(tab)}
@@ -228,6 +247,8 @@ const MainApplication: React.FC = () => {
               {currentTab === 'cohorts' && (
                 <CohortsView
                   cohorts={cohorts}
+                  cohortLevels={cohortLevels}
+                  cohortClasses={cohortClasses}
                   allLearners={learners}
                   curricula={curricula}
                   teachers={teachers}
@@ -247,6 +268,8 @@ const MainApplication: React.FC = () => {
                 <LearnerManagementView
                   learners={learners}
                   cohorts={cohorts}
+                  cohortLevels={cohortLevels}
+                  cohortClasses={cohortClasses}
                   onRefresh={loadSystemData}
                   initialGradeFilter={learnerGradeFilter}
                 />
@@ -265,6 +288,9 @@ const MainApplication: React.FC = () => {
               {currentTab === 'timetable' && (
                 <WeeklyTimetableView
                   cohorts={cohorts}
+                  cohortLevels={cohortLevels}
+                  cohortClasses={cohortClasses}
+                  learners={learners}
                   currentTeacherName={teacherProfile?.fullName || 'Sangurur Staff'}
                   registers={registers}
                 />
