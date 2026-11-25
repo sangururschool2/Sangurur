@@ -98,12 +98,18 @@ export const LearnerDashboard: React.FC<LearnerDashboardProps> = ({
     });
   };
 
-  const nairobiToday = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'Africa/Nairobi',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).format(new Date());
+  const nairobiToday = (() => {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Africa/Nairobi',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).formatToParts(new Date());
+    const year = parts.find((p) => p.type === 'year')?.value || '2026';
+    const month = parts.find((p) => p.type === 'month')?.value || '01';
+    const day = parts.find((p) => p.type === 'day')?.value || '01';
+    return `${year}-${month}-${day}`;
+  })();
 
   const nairobiYesterday = (() => {
     const [y, m, d] = nairobiToday.split('-').map(Number);
@@ -271,12 +277,14 @@ export const LearnerDashboard: React.FC<LearnerDashboardProps> = ({
   const fairCount = registers.filter((r) => r.understandingLevel === 'fair').length;
   const needsSupportCount = registers.filter((r) => r.understandingLevel === 'needs_support').length;
 
-  // Curriculum exposure (preferring class curriculum snapshot, falling back to cohort snapshot)
+  // Curriculum exposure (preferring class curriculum snapshot with topics, falling back to cohort snapshot)
   const activeCurriculumSnapshot =
-    activeClass?.curriculumSnapshot || activeCohort?.curriculumSnapshot;
+    activeClass?.curriculumSnapshot?.learningAreas?.length
+      ? activeClass.curriculumSnapshot
+      : activeCohort?.curriculumSnapshot || activeClass?.curriculumSnapshot;
   const totalCohortTopics =
-    activeCurriculumSnapshot?.learningAreas.reduce(
-      (acc, la) => acc + la.modules.reduce((mAcc, mod) => mAcc + mod.topics.length, 0),
+    (activeCurriculumSnapshot?.learningAreas || []).reduce(
+      (acc, la) => acc + (la?.modules || []).reduce((mAcc, mod) => mAcc + (mod?.topics || []).length, 0),
       0
     ) || 0;
   const coveredTopicIds = new Set(registers.map((r) => r.topicId).filter(Boolean) as string[]);
@@ -693,17 +701,17 @@ export const LearnerDashboard: React.FC<LearnerDashboardProps> = ({
           </div>
 
           <div className="space-y-4">
-            {activeCurriculumSnapshot.learningAreas.map((area, aIdx) => (
+            {(activeCurriculumSnapshot.learningAreas || []).map((area, aIdx) => (
               <div key={area.id} className="space-y-2">
                 <h4 className="text-sm font-extrabold text-emerald-900 uppercase tracking-wider">
                   {aIdx + 1}. {area.title}
                 </h4>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                  {area.modules.map((mod) => (
+                  {(area.modules || []).map((mod) => (
                     <div key={mod.id} className="bg-slate-50 border border-slate-200 rounded-xl p-3.5 space-y-2">
                       <p className="text-sm font-bold text-slate-800">{mod.title}</p>
                       <ul className="space-y-1.5">
-                        {mod.topics.map((top) => {
+                        {(mod.topics || []).map((top) => {
                           const isCovered = coveredTopicIds.has(top.id);
                           return (
                             <li key={top.id} className="flex items-start justify-between gap-2 text-sm">

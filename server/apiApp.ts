@@ -390,6 +390,31 @@ function initAdminServices(): {
   }
 }
 
+function stripUndefinedDeep<T>(value: T): T {
+  if (value === null || value === undefined || typeof value !== 'object') {
+    return value;
+  }
+  if (value instanceof Date || Buffer.isBuffer(value)) {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value
+      .filter((item) => item !== undefined)
+      .map((item) => stripUndefinedDeep(item)) as unknown as T;
+  }
+  const proto = Object.getPrototypeOf(value);
+  if (proto !== null && proto !== Object.prototype) {
+    return value;
+  }
+  const cleaned: Record<string, any> = {};
+  for (const [k, v] of Object.entries(value as Record<string, any>)) {
+    if (v !== undefined) {
+      cleaned[k] = stripUndefinedDeep(v);
+    }
+  }
+  return cleaned as T;
+}
+
 function getServerDbAdapter(): {
   db: ServerDbAdapter | null;
   adminAuth: AdminAuth | null;
@@ -411,10 +436,10 @@ function getServerDbAdapter(): {
       };
     },
     async setDoc(colName, docId, data) {
-      await adminDb.collection(colName).doc(docId).set(data);
+      await adminDb.collection(colName).doc(docId).set(stripUndefinedDeep(data));
     },
     async updateDoc(colName, docId, data) {
-      await adminDb.collection(colName).doc(docId).update(data);
+      await adminDb.collection(colName).doc(docId).update(stripUndefinedDeep(data));
     },
     async getCollectionDocs(colName) {
       const snap = await adminDb.collection(colName).get();
@@ -436,7 +461,7 @@ function getServerDbAdapter(): {
             return { exists: snap.exists, id: snap.id, data: () => snap.data() };
           },
           set(colName: string, docId: string, data: Record<string, any>) {
-            tx.set(adminDb.collection(colName).doc(docId), data);
+            tx.set(adminDb.collection(colName).doc(docId), stripUndefinedDeep(data));
           },
         };
         return fn(wrappedTx);
@@ -590,7 +615,7 @@ function verifyTeacherSessionToken(token: string): TeacherSessionPayload | null 
 async function verifyFirebaseIdToken(
   idToken: string,
   adminAuth: AdminAuth | null
-): Promise<{ uid: string; email: string; emailVerified: boolean; displayName?: string } | null> {
+): Promise<{ uid: string; email: string; emailVerified: boolean; displayName?: string; authTime?: number } | null> {
   if (!idToken) return null;
   if (adminAuth) {
     try {
@@ -600,6 +625,7 @@ async function verifyFirebaseIdToken(
         email: decoded.email || '',
         emailVerified: Boolean(decoded.email_verified || decoded.firebase?.sign_in_provider === 'custom'),
         displayName: decoded.name,
+        authTime: typeof decoded.auth_time === 'number' ? decoded.auth_time * 1000 : undefined,
       };
     } catch {
       return null;
@@ -816,17 +842,62 @@ export function createApiApp(options?: { isServerless?: boolean }): Express {
     next();
   });
 
+  async function isLearnerCohortMember(
+    db: ServerDbAdapter,
+    authLearner: any,
+    cohortId: string,
+    cohortData?: Record<string, any> | null
+  ): Promise<boolean> {
+    const cleanCohortId = String(cohortId || '').trim();
+    if (!cleanCohortId) return false;
+    const assignedIds: string[] = Array.isArray(authLearner?.assignedCohortIds)
+      ? authLearner.assignedCohortIds.map((v: any) => String(v || '').trim()).filter(Boolean)
+      : [];
+
+    const normalizedAssigned = new Set(assignedIds.map((v) => v.toLowerCase()));
+    if (normalizedAssigned.has(cleanCohortId.toLowerCase())) {
+      return true;
+    }
+    const cohortCode = String(cohortData?.code || '').trim();
+    if (cohortCode && normalizedAssigned.has(cohortCode.toLowerCase())) {
+      return true;
+    }
+
+    try {
+      const memSnap = await db.getDoc('cohortMembers', `mem_${cleanCohortId}_${authLearner.id}`);
+      if (memSnap.exists && memSnap.data()?.status !== 'removed') {
+        return true;
+      }
+    } catch {
+      // ignore and try class check
+    }
+
+    const candidateClassIds = Array.from(
+      new Set([
+        ...(Array.isArray(authLearner?.assignedClassIds) ? authLearner.assignedClassIds : []),
+        ...(authLearner?.classId ? [authLearner.classId] : []),
+      ].filter(Boolean))
+    );
+    for (const cid of candidateClassIds) {
+      try {
+        const clsSnap = await db.getDoc('cohortClasses', String(cid));
+        if (clsSnap.exists && clsSnap.data()?.cohortId === cleanCohortId) {
+          return true;
+        }
+      } catch {
+        // continue checking other classes
+      }
+    }
+    return false;
+  }
+
   async function requireLearnerAuth(req: AuthenticatedLearnerRequest, res: Response, next: NextFunction) {
-    const { db, initState } = getServerDbAdapter();
+    const { db, adminAuth, initState } = getServerDbAdapter();
     try {
       const authHeader = req.headers.authorization || '';
       const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
       if (!token) {
         return res.status(401).json({ error: 'Authentication required. Please sign in again.' });
-      }
-      const payload = verifySessionToken(token);
-      if (!payload) {
-        return res.status(401).json({ error: 'Session expired or invalid. Please sign in again.' });
       }
       if (!db || db.mode !== 'admin') {
         return res.status(503).json({
@@ -834,7 +905,23 @@ export function createApiApp(options?: { isServerless?: boolean }): Express {
           code: initState.errorCode,
         });
       }
-      const snap = await db.getDoc('learners', payload.sub);
+
+      const payload = verifySessionToken(token);
+      let learnerDocId = payload?.sub || '';
+      let isFirebaseToken = false;
+      let fbAuthTime: number | undefined;
+
+      if (!payload) {
+        const fbUser = await verifyFirebaseIdToken(token, adminAuth);
+        if (!fbUser || !fbUser.uid) {
+          return res.status(401).json({ error: 'Session expired or invalid. Please sign in again.' });
+        }
+        learnerDocId = fbUser.uid;
+        isFirebaseToken = true;
+        fbAuthTime = fbUser.authTime;
+      }
+
+      const snap = await db.getDoc('learners', learnerDocId);
       if (!snap.exists) {
         return res.status(401).json({ error: 'Learner account no longer exists.' });
       }
@@ -842,21 +929,31 @@ export function createApiApp(options?: { isServerless?: boolean }): Express {
       if (data.status === 'INACTIVE' || data.active === false) {
         return res.status(403).json({ error: 'Learner account is inactive. Please contact your school administrator.' });
       }
-      if (data.sessionRevokedAt && payload.iat < Number(data.sessionRevokedAt)) {
+      if (!isFirebaseToken && payload && data.sessionRevokedAt && payload.iat < Number(data.sessionRevokedAt)) {
         return res.status(401).json({ error: 'Session has been logged out or reset. Please sign in again.' });
       }
+      if (isFirebaseToken && data.passwordResetAt && fbAuthTime && fbAuthTime < Number(data.passwordResetAt)) {
+        return res.status(401).json({ error: 'Your password was recently reset. Please sign in again.' });
+      }
+
+      const digitalId = data.digitalId || data.learnerId || data.username || snap.id;
       req.authLearner = {
         id: snap.id,
-        digitalId: data.digitalId || data.learnerId,
-        learnerId: data.digitalId || data.learnerId,
-        fullName: data.fullName,
-        username: data.username || data.digitalId || data.learnerId,
-        assignedCohortIds: data.assignedCohortIds || [],
+        digitalId,
+        learnerId: digitalId,
+        fullName: data.fullName || 'Learner',
+        username: data.username || digitalId,
+        assignedCohortIds: Array.isArray(data.assignedCohortIds) ? data.assignedCohortIds : [],
+        assignedClassIds: Array.isArray(data.assignedClassIds) ? data.assignedClassIds : [],
+        levelId: data.levelId || null,
+        levelName: data.levelName || null,
+        classId: data.classId || null,
+        className: data.className || null,
         mustChangePassword: data.mustChangePassword ?? data.isFirstLogin ?? true,
         isFirstLogin: data.mustChangePassword ?? data.isFirstLogin ?? true,
         status: data.status || 'ACTIVE',
-        gender: data.gender,
-        age: data.age,
+        gender: data.gender ?? null,
+        age: data.age ?? null,
         passwordHash: data.passwordHash,
         salt: data.salt,
       };
@@ -1397,18 +1494,54 @@ export function createApiApp(options?: { isServerless?: boolean }): Express {
       if (!db) {
         return res.status(503).json({ error: 'Database service unavailable' });
       }
-      const assignedIds: string[] = req.authLearner.assignedCohortIds || [];
-      if (assignedIds.length === 0) {
-        return res.json({ success: true, cohorts: [], levels: [], classes: [] });
-      }
-      const [docs, levelDocs, classDocs] = await Promise.all([
+      const assignedIds: string[] = Array.isArray(req.authLearner.assignedCohortIds)
+        ? req.authLearner.assignedCohortIds
+        : [];
+      const normalizedAssigned = new Set(
+        assignedIds.map((v) => String(v || '').trim().toLowerCase()).filter(Boolean)
+      );
+
+      const [docs, levelDocs, classDocs, memberDocs] = await Promise.all([
         db.getCollectionDocs('cohorts'),
         db.getCollectionDocs('cohortLevels'),
         db.getCollectionDocs('cohortClasses'),
+        db.queryWhere('cohortMembers', [['learnerId', '==', req.authLearner.id]]),
       ]);
+
+      memberDocs.forEach((m) => {
+        const mData = m.data();
+        if (mData?.cohortId && mData?.status !== 'removed') {
+          normalizedAssigned.add(String(mData.cohortId).trim().toLowerCase());
+        }
+      });
+
+      const classCohortMap = new Map<string, string>();
+      classDocs.forEach((d) => {
+        const cls = d.data();
+        if (cls?.cohortId) classCohortMap.set(d.id, String(cls.cohortId));
+      });
+      const assignedClassList = Array.from(
+        new Set([
+          ...(Array.isArray(req.authLearner.assignedClassIds) ? req.authLearner.assignedClassIds : []),
+          ...(req.authLearner.classId ? [req.authLearner.classId] : []),
+        ].filter(Boolean))
+      );
+      assignedClassList.forEach((cid) => {
+        const cId = classCohortMap.get(String(cid));
+        if (cId) normalizedAssigned.add(cId.trim().toLowerCase());
+      });
+
+      if (normalizedAssigned.size === 0) {
+        return res.json({ success: true, cohorts: [], levels: [], classes: [] });
+      }
+
       const cohorts = docs
         .map((d) => ({ ...d.data(), id: d.id }))
-        .filter((c: any) => assignedIds.includes(c.id) || assignedIds.includes(c.code));
+        .filter((c: any) => {
+          const idMatch = normalizedAssigned.has(String(c.id || '').trim().toLowerCase());
+          const codeMatch = c.code && normalizedAssigned.has(String(c.code).trim().toLowerCase());
+          return idMatch || codeMatch;
+        });
       const cohortIdSet = new Set(cohorts.map((c: any) => c.id));
       const levels = levelDocs
         .map((d) => ({ ...d.data(), id: d.id }))
@@ -1431,19 +1564,11 @@ export function createApiApp(options?: { isServerless?: boolean }): Express {
         return res.status(503).json({ error: 'Database service unavailable' });
       }
       const cohortId = req.query.cohortId ? String(req.query.cohortId) : undefined;
-      const assignedIds: string[] = req.authLearner.assignedCohortIds || [];
 
       if (cohortId) {
-        let isMember = assignedIds.includes(cohortId);
-        if (!isMember) {
-          const cohortSnap = await db.getDoc('cohorts', cohortId);
-          if (cohortSnap.exists) {
-            const cohortCode = cohortSnap.data()?.code;
-            if (cohortCode && assignedIds.includes(cohortCode)) {
-              isMember = true;
-            }
-          }
-        }
+        const cohortSnap = await db.getDoc('cohorts', cohortId);
+        const cohortData = cohortSnap.exists ? cohortSnap.data() || null : null;
+        const isMember = await isLearnerCohortMember(db, req.authLearner, cohortId, cohortData);
         if (!isMember) {
           return res.status(403).json({ error: 'Access denied: you are not assigned to this cohort.' });
         }
@@ -1495,14 +1620,9 @@ export function createApiApp(options?: { isServerless?: boolean }): Express {
         return res.status(400).json({ error: 'Cohort ID is required.' });
       }
 
-      const assignedIds: string[] = req.authLearner.assignedCohortIds || [];
-      let isMember = assignedIds.includes(cohortId);
-      if (!isMember) {
-        const cohortSnap = await db.getDoc('cohorts', cohortId);
-        if (cohortSnap.exists && cohortSnap.data()?.code && assignedIds.includes(cohortSnap.data()?.code)) {
-          isMember = true;
-        }
-      }
+      const cohortSnap = await db.getDoc('cohorts', cohortId);
+      const cohortData = cohortSnap.exists ? cohortSnap.data() || null : null;
+      const isMember = await isLearnerCohortMember(db, req.authLearner, cohortId, cohortData);
       if (!isMember) {
         return res.status(403).json({ error: 'Access denied: you are not assigned to this cohort.' });
       }
@@ -1899,6 +2019,7 @@ export function createApiApp(options?: { isServerless?: boolean }): Express {
       const salt = generateSalt();
       const passwordHash = hashPassword(DEFAULT_INITIAL_PASSWORD, salt);
 
+      const resetTimestamp = Date.now();
       await db.updateDoc('learners', learnerId, {
         passwordHash,
         salt,
@@ -1906,7 +2027,8 @@ export function createApiApp(options?: { isServerless?: boolean }): Express {
         isFirstLogin: true,
         status: 'ACTIVE',
         active: true,
-        sessionRevokedAt: Date.now(),
+        sessionRevokedAt: resetTimestamp,
+        passwordResetAt: resetTimestamp,
         updatedAt: new Date().toISOString(),
       });
 
@@ -2003,7 +2125,8 @@ export function createApiApp(options?: { isServerless?: boolean }): Express {
 
       const isPreviousDay = targetDate < nairobiToday;
 
-      const cohortSnap = await db.getDoc('cohorts', String(cohortId));
+      const cleanCohortId = String(cohortId).trim();
+      const cohortSnap = await db.getDoc('cohorts', cleanCohortId);
       if (!cohortSnap.exists) {
         return res.status(404).json({ error: 'Cohort not found.' });
       }
@@ -2012,16 +2135,17 @@ export function createApiApp(options?: { isServerless?: boolean }): Express {
         return res.status(403).json({ error: 'Attendance cannot be submitted to an archived or inactive cohort.' });
       }
 
-      const assignedIds: string[] = authLearner.assignedCohortIds || [];
-      if (!assignedIds.includes(cohortId) && !assignedIds.includes(cohortData.code)) {
+      const isMember = await isLearnerCohortMember(db, authLearner, cleanCohortId, cohortData);
+      if (!isMember) {
         return res.status(403).json({ error: 'Access denied: you are not assigned to this cohort.' });
       }
 
-      if (!['present', 'late'].includes(status)) {
+      const normalizedStatus = String(status).trim().toLowerCase();
+      if (!['present', 'late'].includes(normalizedStatus)) {
         return res.status(400).json({ error: 'Learners can only submit Present or Late attendance' });
       }
 
-      const studied = didStudy !== false;
+      const studied = didStudy !== false && didStudy !== 'false';
       const cleanNonStudyReason = !studied
         ? String(nonStudyReason || '').trim().slice(0, 256)
         : null;
@@ -2033,8 +2157,8 @@ export function createApiApp(options?: { isServerless?: boolean }): Express {
       }
 
       const validUnderstanding = studied
-        ? ['excellent', 'good', 'fair', 'needs_support'].includes(understandingLevel)
-          ? understandingLevel
+        ? ['excellent', 'good', 'fair', 'needs_support'].includes(String(understandingLevel || ''))
+          ? String(understandingLevel)
           : 'good'
         : null;
 
@@ -2048,26 +2172,29 @@ export function createApiApp(options?: { isServerless?: boolean }): Express {
         // default true
       }
 
-      const docId = `reg_${cohortId}_${authLearner.id}_${targetDate}`;
+      const docId = `reg_${cleanCohortId}_${authLearner.id}_${targetDate}`;
       const resolvedLevelId = levelId ? String(levelId).slice(0, 128) : authLearner.levelId || null;
       const resolvedLevelName = levelName ? String(levelName).slice(0, 128) : authLearner.levelName || null;
       const resolvedClassId = classId ? String(classId).slice(0, 128) : authLearner.classId || null;
       const resolvedClassName = className ? String(className).slice(0, 128) : authLearner.className || null;
+      const resolvedLearnerCode =
+        authLearner.digitalId || authLearner.learnerId || authLearner.username || authLearner.id;
+      const resolvedLearnerName = authLearner.fullName || 'Learner';
 
       const payload: any = {
         id: docId,
-        cohortId,
-        cohortCode: cohortCode || cohortData.code || 'COHORT',
+        cohortId: cleanCohortId,
+        cohortCode: String(cohortCode || cohortData.code || 'COHORT').slice(0, 64),
         levelId: resolvedLevelId,
         levelName: resolvedLevelName,
         classId: resolvedClassId,
         className: resolvedClassName,
         learnerDocId: authLearner.id,
-        learnerId: authLearner.digitalId || authLearner.learnerId,
-        learnerName: authLearner.fullName,
+        learnerId: resolvedLearnerCode,
+        learnerName: resolvedLearnerName,
         date: targetDate,
         timestamp: new Date().toISOString(),
-        status,
+        status: normalizedStatus,
         didStudy: studied,
         nonStudyReason: cleanNonStudyReason,
         verificationStatus: 'pending_verification',
@@ -2076,7 +2203,7 @@ export function createApiApp(options?: { isServerless?: boolean }): Express {
         moduleId: studied && moduleId ? String(moduleId).slice(0, 128) : null,
         moduleTitle: studied && moduleTitle ? String(moduleTitle).slice(0, 128) : null,
         topicId: studied && topicId ? String(topicId).slice(0, 128) : null,
-        topicTitle: studied && topicTitle ? String(topicTitle).slice(0, 128) : null,
+        topicTitle: studied && topicTitle ? String(topicTitle).trim().slice(0, 128) || null : null,
         topicDescription: studied && topicDescription ? String(topicDescription).slice(0, 512) : null,
         understandingLevel: validUnderstanding,
         reflectionLearned: allowReflections && reflectionLearned ? String(reflectionLearned).slice(0, 1024) : null,
@@ -2097,9 +2224,20 @@ export function createApiApp(options?: { isServerless?: boolean }): Express {
           if (['absent', 'excused'].includes(existingData.status)) {
             return { conflict: existingData, blocked: true, updated: false, saved: null };
           }
-          const mergedPrevious = {
+          const mergedPrevious = stripUndefinedDeep({
             ...existingData,
-            status: existingData.verificationStatus === 'corrected' ? existingData.status : status,
+            id: docId,
+            cohortId: cleanCohortId,
+            cohortCode: existingData.cohortCode || payload.cohortCode,
+            levelId: existingData.levelId ?? payload.levelId,
+            levelName: existingData.levelName ?? payload.levelName,
+            classId: existingData.classId ?? payload.classId,
+            className: existingData.className ?? payload.className,
+            learnerDocId: authLearner.id,
+            learnerId: existingData.learnerId || payload.learnerId,
+            learnerName: existingData.learnerName || payload.learnerName,
+            date: targetDate,
+            status: existingData.verificationStatus === 'corrected' ? existingData.status : normalizedStatus,
             didStudy: studied,
             nonStudyReason: cleanNonStudyReason,
             learningAreaId: payload.learningAreaId,
@@ -2116,7 +2254,7 @@ export function createApiApp(options?: { isServerless?: boolean }): Express {
             reflectionTeacherExplain:
               payload.reflectionTeacherExplain ?? existingData.reflectionTeacherExplain ?? null,
             timestamp: existingData.timestamp || new Date().toISOString(),
-          };
+          });
           tx.set('dailyRegisters', docId, mergedPrevious);
           return { conflict: null, blocked: false, updated: true, saved: mergedPrevious };
         }
@@ -2127,7 +2265,7 @@ export function createApiApp(options?: { isServerless?: boolean }): Express {
 
       if (txResult.blocked) {
         return res.status(403).json({
-          error: `A teacher marked you ${txResult.conflict?.status?.toUpperCase()} on ${targetDate}. Please contact your teacher to correct attendance.`,
+          error: `A teacher marked you ${String(txResult.conflict?.status || '').toUpperCase()} on ${targetDate}. Please contact your teacher to correct attendance.`,
         });
       }
 
@@ -2142,7 +2280,7 @@ export function createApiApp(options?: { isServerless?: boolean }): Express {
       if (isPreviousDay) {
         await writeAuditLog(db, {
           actorId: authLearner.id,
-          actorName: authLearner.fullName,
+          actorName: resolvedLearnerName,
           actorRole: 'learner',
           action: txResult.updated ? 'LEARNER_UPDATE_PREVIOUS_DAY_REGISTER' : 'LEARNER_SUBMIT_PREVIOUS_DAY_REGISTER',
           targetEntity: 'dailyRegister',

@@ -250,12 +250,61 @@ service cloud.firestore {
     // Daily Registers Collection: Cohort-owned teacher writes + strict learner self-ownership
     function isValidDailyRegister(data) {
       return data.keys().hasAll(['cohortId', 'learnerDocId', 'date', 'status']) &&
+             data.keys().hasOnly([
+               'id', 'cohortId', 'cohortCode', 'levelId', 'levelName', 'classId', 'className',
+               'learnerDocId', 'learnerId', 'learnerName', 'date', 'timestamp', 'status',
+               'didStudy', 'nonStudyReason', 'verificationStatus', 'learningAreaId',
+               'learningAreaTitle', 'moduleId', 'moduleTitle', 'topicId', 'topicTitle',
+               'topicDescription', 'understandingLevel', 'reflectionLearned',
+               'reflectionActivity', 'reflectionDifficult', 'reflectionTeacherExplain',
+               'teacherNote', 'reviewedBy', 'reviewedAt', 'correctionHistory'
+             ]) &&
              data.cohortId is string && data.cohortId.size() > 0 && data.cohortId.size() <= 128 &&
              data.learnerDocId is string && data.learnerDocId.size() > 0 && data.learnerDocId.size() <= 128 &&
              data.date is string && data.date.size() == 10 &&
              data.status in ['present', 'late', 'absent', 'excused'] &&
+             (!data.keys().hasAny(['id']) || (data.id is string && data.id.size() <= 128)) &&
+             (!data.keys().hasAny(['cohortCode']) || data.cohortCode == null || (data.cohortCode is string && data.cohortCode.size() <= 64)) &&
+             (!data.keys().hasAny(['levelId']) || data.levelId == null || (data.levelId is string && data.levelId.size() <= 128)) &&
+             (!data.keys().hasAny(['levelName']) || data.levelName == null || (data.levelName is string && data.levelName.size() <= 128)) &&
+             (!data.keys().hasAny(['classId']) || data.classId == null || (data.classId is string && data.classId.size() <= 128)) &&
+             (!data.keys().hasAny(['className']) || data.className == null || (data.className is string && data.className.size() <= 128)) &&
+             (!data.keys().hasAny(['learnerId']) || data.learnerId == null || (data.learnerId is string && data.learnerId.size() <= 64)) &&
+             (!data.keys().hasAny(['learnerName']) || data.learnerName == null || (data.learnerName is string && data.learnerName.size() <= 128)) &&
+             (!data.keys().hasAny(['timestamp']) || (data.timestamp is string && data.timestamp.size() <= 64)) &&
              (!data.keys().hasAny(['didStudy']) || data.didStudy == null || data.didStudy is bool) &&
-             (!data.keys().hasAny(['nonStudyReason']) || data.nonStudyReason == null || (data.nonStudyReason is string && data.nonStudyReason.size() <= 256));
+             (!data.keys().hasAny(['nonStudyReason']) || data.nonStudyReason == null || (data.nonStudyReason is string && data.nonStudyReason.size() <= 256)) &&
+             (!data.keys().hasAny(['verificationStatus']) || data.verificationStatus in ['pending_verification', 'verified', 'corrected']) &&
+             (!data.keys().hasAny(['learningAreaId']) || data.learningAreaId == null || (data.learningAreaId is string && data.learningAreaId.size() <= 128)) &&
+             (!data.keys().hasAny(['learningAreaTitle']) || data.learningAreaTitle == null || (data.learningAreaTitle is string && data.learningAreaTitle.size() <= 128)) &&
+             (!data.keys().hasAny(['moduleId']) || data.moduleId == null || (data.moduleId is string && data.moduleId.size() <= 128)) &&
+             (!data.keys().hasAny(['moduleTitle']) || data.moduleTitle == null || (data.moduleTitle is string && data.moduleTitle.size() <= 128)) &&
+             (!data.keys().hasAny(['topicId']) || data.topicId == null || (data.topicId is string && data.topicId.size() <= 128)) &&
+             (!data.keys().hasAny(['topicTitle']) || data.topicTitle == null || (data.topicTitle is string && data.topicTitle.size() <= 128)) &&
+             (!data.keys().hasAny(['topicDescription']) || data.topicDescription == null || (data.topicDescription is string && data.topicDescription.size() <= 512)) &&
+             (!data.keys().hasAny(['understandingLevel']) || data.understandingLevel == null || data.understandingLevel in ['excellent', 'good', 'fair', 'needs_support']) &&
+             (!data.keys().hasAny(['reflectionLearned']) || data.reflectionLearned == null || (data.reflectionLearned is string && data.reflectionLearned.size() <= 1024)) &&
+             (!data.keys().hasAny(['reflectionActivity']) || data.reflectionActivity == null || (data.reflectionActivity is string && data.reflectionActivity.size() <= 1024)) &&
+             (!data.keys().hasAny(['reflectionDifficult']) || data.reflectionDifficult == null || (data.reflectionDifficult is string && data.reflectionDifficult.size() <= 1024)) &&
+             (!data.keys().hasAny(['reflectionTeacherExplain']) || data.reflectionTeacherExplain == null || (data.reflectionTeacherExplain is string && data.reflectionTeacherExplain.size() <= 1024)) &&
+             (!data.keys().hasAny(['teacherNote']) || data.teacherNote == null || (data.teacherNote is string && data.teacherNote.size() <= 1024)) &&
+             (!data.keys().hasAny(['reviewedBy']) || data.reviewedBy == null || (data.reviewedBy is string && data.reviewedBy.size() <= 128)) &&
+             (!data.keys().hasAny(['reviewedAt']) || data.reviewedAt == null || (data.reviewedAt is string && data.reviewedAt.size() <= 64)) &&
+             (!data.keys().hasAny(['correctionHistory']) || (data.correctionHistory is list && data.correctionHistory.size() <= 50));
+    }
+
+    function isLearnerEligibleForCohort(cohortId) {
+      return isLearnerUser() &&
+             get(/databases/$(database)/documents/learners/$(request.auth.uid)).data.status != 'INACTIVE' &&
+             get(/databases/$(database)/documents/learners/$(request.auth.uid)).data.active != false &&
+             get(/databases/$(database)/documents/learners/$(request.auth.uid)).data.mustChangePassword != true &&
+             exists(/databases/$(database)/documents/cohorts/$(cohortId)) &&
+             get(/databases/$(database)/documents/cohorts/$(cohortId)).data.status == 'active' &&
+             (
+               cohortId in get(/databases/$(database)/documents/learners/$(request.auth.uid)).data.assignedCohortIds ||
+               get(/databases/$(database)/documents/cohorts/$(cohortId)).data.code in get(/databases/$(database)/documents/learners/$(request.auth.uid)).data.assignedCohortIds ||
+               exists(/databases/$(database)/documents/cohortMembers/$(('mem_' + cohortId + '_' + request.auth.uid)))
+             );
     }
 
     match /dailyRegisters/{registerId} {
@@ -267,14 +316,47 @@ service cloud.firestore {
       allow create: if isValidId(registerId) &&
                        isSignedIn() &&
                        isValidDailyRegister(incoming()) &&
-                       ownsCohort(incoming().cohortId);
+                       (
+                         ownsCohort(incoming().cohortId) ||
+                         (
+                           registerId == ('reg_' + incoming().cohortId + '_' + request.auth.uid + '_' + incoming().date) &&
+                           incoming().learnerDocId == request.auth.uid &&
+                           incoming().status in ['present', 'late'] &&
+                           incoming().verificationStatus == 'pending_verification' &&
+                           (!incoming().keys().hasAny(['teacherNote', 'reviewedBy', 'reviewedAt']) || (
+                             (!incoming().keys().hasAny(['teacherNote']) || incoming().teacherNote == null) &&
+                             (!incoming().keys().hasAny(['reviewedBy']) || incoming().reviewedBy == null) &&
+                             (!incoming().keys().hasAny(['reviewedAt']) || incoming().reviewedAt == null)
+                           )) &&
+                           isLearnerEligibleForCohort(incoming().cohortId)
+                         )
+                       );
       allow update: if isValidId(registerId) &&
                        isSignedIn() &&
                        isValidDailyRegister(incoming()) &&
                        incoming().cohortId == existing().cohortId &&
                        incoming().learnerDocId == existing().learnerDocId &&
                        incoming().date == existing().date &&
-                       ownsCohort(existing().cohortId);
+                       (
+                         ownsCohort(existing().cohortId) ||
+                         (
+                           registerId == ('reg_' + existing().cohortId + '_' + request.auth.uid + '_' + existing().date) &&
+                           existing().learnerDocId == request.auth.uid &&
+                           !(existing().status in ['absent', 'excused']) &&
+                           incoming().status in ['present', 'late'] &&
+                           incoming().verificationStatus == existing().verificationStatus &&
+                           incoming().diff(existing()).affectedKeys().hasOnly([
+                             'status', 'didStudy', 'nonStudyReason',
+                             'learningAreaId', 'learningAreaTitle',
+                             'moduleId', 'moduleTitle',
+                             'topicId', 'topicTitle', 'topicDescription',
+                             'understandingLevel', 'reflectionLearned',
+                             'reflectionActivity', 'reflectionDifficult',
+                             'reflectionTeacherExplain', 'timestamp'
+                           ]) &&
+                           isLearnerEligibleForCohort(existing().cohortId)
+                         )
+                       );
       allow delete: if isValidId(registerId) && isAdmin();
     }
 

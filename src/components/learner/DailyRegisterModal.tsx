@@ -1,5 +1,7 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import confetti from 'canvas-confetti';
+import { doc, runTransaction } from 'firebase/firestore';
+import { auth, db } from '../../services/firebase';
 import { useAuth } from '../../context/AuthContext';
 import {
   Cohort,
@@ -55,10 +57,37 @@ const NON_STUDY_REASONS = [
   'Other reason',
 ];
 
+function getNairobiTodayString(): string {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Africa/Nairobi',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(new Date());
+  const year = parts.find((p) => p.type === 'year')?.value || '2026';
+  const month = parts.find((p) => p.type === 'month')?.value || '01';
+  const day = parts.find((p) => p.type === 'day')?.value || '01';
+  return `${year}-${month}-${day}`;
+}
+
 function getPreviousNairobiDate(baseYmd: string, daysBack = 1): string {
   const [y, m, d] = baseYmd.split('-').map(Number);
   const dt = new Date(Date.UTC(y, m - 1, d - daysBack));
   return dt.toISOString().slice(0, 10);
+}
+
+async function safeReadJson(res: Response): Promise<any> {
+  const raw = await res.text();
+  if (!raw) return {};
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return {
+      error: raw.trim().startsWith('<')
+        ? `Server returned an unexpected response (HTTP ${res.status}). Please try again.`
+        : `Invalid response from server (HTTP ${res.status}).`,
+    };
+  }
 }
 
 export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
@@ -90,14 +119,10 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
   }, [learnerToken]);
 
   // Nairobi local date
-  const nairobiToday = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'Africa/Nairobi',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).format(new Date());
-
+  const nairobiToday = useMemo(() => getNairobiTodayString(), []);
   const nairobiYesterday = useMemo(() => getPreviousNairobiDate(nairobiToday, 1), [nairobiToday]);
+  const modalBodyRef = useRef<HTMLDivElement | null>(null);
+  const userModifiedTopicRef = useRef<boolean>(false);
 
   const [selectedDate, setSelectedDate] = useState<string>(initialDate || nairobiToday);
   const [step, setStep] = useState<number>(1); // 1: Date & Attendance/Study Status, 2: Area & Topic, 3: Understanding, 4: Reflection, 5: Review
@@ -135,6 +160,16 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
 
   const [submitting, setSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    userModifiedTopicRef.current = false;
+  }, [selectedDate]);
+
+  useEffect(() => {
+    if (errorMessage && modalBodyRef.current) {
+      modalBodyRef.current.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+  }, [errorMessage]);
 
   const isToday = selectedDate === nairobiToday;
 
@@ -183,27 +218,29 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
       scheduleLabel?: string;
     }[] = [];
 
-    if (matchedWeek && matchedWeek.topics?.length) {
+    if (matchedWeek && Array.isArray(matchedWeek.topics) && matchedWeek.topics.length > 0) {
       matchedWeek.topics.forEach((slot, idx) => {
+        const termFallback = matchedWeek.programmeTerm || cohort.programme || 'Programme';
+        const areaTitle = slot.learningArea || termFallback;
         const syntheticTopic: Topic = {
-          id: slot.id,
-          title: slot.topicTitle,
-          description: slot.practicalActivity || matchedWeek.weeklyTheme || matchedWeek.weekLabel,
+          id: slot.id || `slot_${matchedWeek.id}_${idx}`,
+          title: slot.topicTitle || `Session ${idx + 1}`,
+          description: slot.practicalActivity || matchedWeek.weeklyTheme || matchedWeek.weekLabel || '',
           learningObjectives: slot.practicalActivity ? [slot.practicalActivity] : [],
-          expectedDuration: slot.timeSlot,
+          expectedDuration: slot.timeSlot || '2 hours',
           order: idx + 1,
         };
         const syntheticArea: LearningArea = {
-          id: `area_${(slot.learningArea || matchedWeek.programmeTerm).toLowerCase().replace(/[^a-z0-9]+/g, '_')}`,
-          title: slot.learningArea || matchedWeek.programmeTerm,
+          id: `area_${areaTitle.toLowerCase().replace(/[^a-z0-9]+/g, '_')}`,
+          title: areaTitle,
           description: matchedWeek.weeklyTheme || '',
           modules: [],
           order: 1,
         };
         const syntheticModule: Module = {
           id: matchedWeek.id,
-          title: `Week ${matchedWeek.weekNumber}: ${slot.dayOfWeek} (${slot.timeSlot})`,
-          description: matchedWeek.weekLabel,
+          title: `Week ${matchedWeek.weekNumber || 1}: ${slot.dayOfWeek || 'Day'} (${slot.timeSlot || 'Session'})`,
+          description: matchedWeek.weekLabel || '',
           topics: [syntheticTopic],
           order: 1,
         };
@@ -212,7 +249,7 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
           learningArea: syntheticArea,
           module: syntheticModule,
           source: 'timetable',
-          scheduleLabel: `${slot.dayOfWeek} • ${slot.timeSlot}`,
+          scheduleLabel: `${slot.dayOfWeek || 'Session'} • ${slot.timeSlot || ''}`.trim(),
         });
       });
     }
@@ -225,13 +262,17 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
       scheduleLabel?: string;
     }[] = [];
 
+    const classAreas = cohortClass?.curriculumSnapshot?.learningAreas;
+    const cohortAreas = cohort.curriculumSnapshot?.learningAreas;
     const areas =
-      cohortClass?.curriculumSnapshot?.learningAreas ||
-      cohort.curriculumSnapshot?.learningAreas ||
-      [];
+      Array.isArray(classAreas) && classAreas.length > 0
+        ? classAreas
+        : Array.isArray(cohortAreas)
+        ? cohortAreas
+        : [];
     areas.forEach((area) => {
-      area.modules.forEach((mod) => {
-        mod.topics.forEach((top) => {
+      (area?.modules || []).forEach((mod) => {
+        (mod?.topics || []).forEach((top) => {
           curriculumItems.push({
             topic: top,
             learningArea: area,
@@ -242,26 +283,29 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
       });
     });
 
-    const existingAreaTitles = new Set(areas.map((a) => a.title.trim().toLowerCase()));
+    const existingAreaTitles = new Set(
+      areas.map((a) => String(a?.title || '').trim().toLowerCase()).filter(Boolean)
+    );
     (cohortClass?.coursesOffered || []).forEach((course, idx) => {
-      if (existingAreaTitles.has(course.title.trim().toLowerCase())) return;
+      const courseTitle = String(course?.title || '').trim();
+      if (!courseTitle || existingAreaTitles.has(courseTitle.toLowerCase())) return;
       const syntheticTopic: Topic = {
         id: `course_topic_${course.id || idx}`,
-        title: `${course.title} — Guided Class Session`,
+        title: `${courseTitle} — Guided Class Session`,
         description: course.description || `${cohortClass?.name || ''} course session`,
         learningObjectives: [],
         expectedDuration: course.hoursPerWeek || '2 hours',
         order: idx + 1,
       };
       const syntheticArea: LearningArea = {
-        id: course.id,
-        title: course.title,
+        id: course.id || `course_area_${idx}`,
+        title: courseTitle,
         description: course.description || '',
         modules: [],
         order: idx + 1,
       };
       const syntheticModule: Module = {
-        id: `course_mod_${course.id}`,
+        id: `course_mod_${course.id || idx}`,
         title: course.code ? `${course.code} • Course Offered` : 'Class Course Offered',
         description: course.description || '',
         topics: [syntheticTopic],
@@ -277,6 +321,11 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
 
     const merged = [...timetableItems, ...curriculumItems];
     setAllTopics(merged);
+
+    // Do not clobber explicit learner selections when timetableEntries finishes loading asynchronously
+    if (userModifiedTopicRef.current) {
+      return;
+    }
 
     // If prefilling from existing previous day submission, preserve it cleanly
     if (existingForSelectedDate && existingForSelectedDate.date < nairobiToday) {
@@ -320,14 +369,22 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
       } else if (merged.length > 0) {
         setUseCustomTopic(false);
         setSelectedTopicId(merged[0].topic.id);
+      } else {
+        setUseCustomTopic(true);
+        setCustomAreaTitle(
+          existingForSelectedDate.learningAreaTitle ||
+            cohortClass?.coursesOffered?.[0]?.title ||
+            cohort.programme ||
+            'General ICT'
+        );
       }
       return;
     }
 
     // Default selection matching the day of the week of selectedDate
-    setUseCustomTopic(false);
     setSelectedAreaFilter('ALL');
     if (timetableItems.length > 0) {
+      setUseCustomTopic(false);
       const [yy, mm, dd] = selectedDate.split('-').map(Number);
       const weekday = new Intl.DateTimeFormat('en-US', {
         timeZone: 'UTC',
@@ -338,7 +395,12 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
       );
       setSelectedTopicId((daySlot || timetableItems[0]).topic.id);
     } else if (curriculumItems.length > 0) {
+      setUseCustomTopic(false);
       setSelectedTopicId(curriculumItems[0].topic.id);
+    } else {
+      setUseCustomTopic(true);
+      setSelectedTopicId('');
+      setCustomAreaTitle((prev) => prev || cohort.programme || 'General ICT');
     }
   }, [cohort, cohortClass, timetableEntries, selectedDate, existingForSelectedDate, nairobiToday]);
 
@@ -483,11 +545,15 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
 
     if (step === 2) {
       if (useCustomTopic && !customTopicTitle.trim()) {
-        setErrorMessage('Please enter the topic covered or switch back to select a listed topic.');
+        setErrorMessage(
+          allTopics.length > 0
+            ? 'Please enter the topic covered or switch back to select a listed topic.'
+            : 'Please enter the specific topic you studied on this date.'
+        );
         return;
       }
-      if (!useCustomTopic && !activeTopicItem && allTopics.length > 0) {
-        setErrorMessage('Please select the area & topic learned on this date.');
+      if (!useCustomTopic && !activeTopicItem) {
+        setErrorMessage('Please select the area & topic learned on this date, or switch to "+ Enter Other Area / Topic".');
         return;
       }
       setStep(3);
@@ -511,38 +577,59 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
   };
 
   const handleSubmit = async () => {
+    if (didStudy && useCustomTopic && !customTopicTitle.trim()) {
+      setErrorMessage('Please go back to Section B and enter the topic covered.');
+      return;
+    }
+    if (didStudy && !useCustomTopic && !activeTopicItem) {
+      setErrorMessage('Please go back to Section B and select or enter the topic covered.');
+      return;
+    }
+    if (!didStudy && !effectiveNonStudyReason) {
+      setErrorMessage('Please go back to Section A and select or enter why you did not study.');
+      return;
+    }
+
     setSubmitting(true);
     setErrorMessage(null);
 
     const payload = {
       cohortId: cohort.id,
-      cohortCode: cohort.code,
+      cohortCode: cohort.code || 'COHORT',
       levelId: cohortLevel?.id || cohortClass?.levelId || learner.levelId || null,
       levelName: cohortLevel?.name || cohortClass?.levelName || learner.levelName || null,
       classId: cohortClass?.id || learner.classId || null,
       className: cohortClass?.name || learner.className || null,
       learnerDocId: learner.id,
-      learnerId: learner.learnerId,
-      learnerName: learner.fullName,
+      learnerId: learner.digitalId || learner.learnerId || learner.username || learner.id,
+      learnerName: learner.fullName || 'Learner',
       date: selectedDate,
       status,
       didStudy,
       nonStudyReason: didStudy ? null : effectiveNonStudyReason,
-      topicId: didStudy ? (useCustomTopic ? `custom_${Date.now()}` : activeTopicItem?.topic.id) : null,
-      topicTitle: didStudy ? resolvedTopicTitle : null,
+      topicId: didStudy
+        ? useCustomTopic
+          ? `custom_${Date.now()}`
+          : activeTopicItem?.topic.id || `topic_${Date.now()}`
+        : null,
+      topicTitle: didStudy ? resolvedTopicTitle || null : null,
       topicDescription: didStudy
         ? useCustomTopic
           ? `Area: ${resolvedAreaTitle}`
-          : activeTopicItem?.topic.description
+          : activeTopicItem?.topic.description || null
         : null,
       learningAreaId: didStudy
         ? useCustomTopic
           ? 'custom_area'
-          : activeTopicItem?.learningArea.id
+          : activeTopicItem?.learningArea.id || null
         : null,
-      learningAreaTitle: didStudy ? resolvedAreaTitle : null,
-      moduleId: didStudy ? (useCustomTopic ? null : activeTopicItem?.module.id) : null,
-      moduleTitle: didStudy ? (useCustomTopic ? 'Self-Logged Session' : activeTopicItem?.module.title) : null,
+      learningAreaTitle: didStudy ? resolvedAreaTitle || null : null,
+      moduleId: didStudy ? (useCustomTopic ? null : activeTopicItem?.module.id || null) : null,
+      moduleTitle: didStudy
+        ? useCustomTopic
+          ? 'Self-Logged Session'
+          : activeTopicItem?.module.title || null
+        : null,
       understandingLevel: didStudy ? understandingLevel : null,
       reflectionLearned: allowReflections ? reflectionLearned : '',
       reflectionActivity: allowReflections ? reflectionActivity : '',
@@ -550,19 +637,101 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
       reflectionTeacherExplain: allowReflections ? reflectionTeacherExplain : '',
     };
 
-    try {
-      const res = await fetch('/api/attendance/submit', {
+    const submitWithBearer = async (bearerToken: string | null) => {
+      return fetch('/api/attendance/submit', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          ...(learnerToken ? { Authorization: `Bearer ${learnerToken}` } : {}),
+          ...(bearerToken ? { Authorization: `Bearer ${bearerToken}` } : {}),
         },
         body: JSON.stringify(payload),
       });
+    };
 
-      const data = await res.json();
+    try {
+      let activeToken: string | null = learnerToken;
+      if (!activeToken && auth.currentUser) {
+        activeToken = await auth.currentUser.getIdToken();
+      }
+
+      let res = await submitWithBearer(activeToken);
+
+      // If HMAC session token failed (e.g. cold serverless instance / rotated secret), retry with fresh Firebase ID token
+      if (res.status === 401 && auth.currentUser) {
+        const freshFirebaseToken = await auth.currentUser.getIdToken(true);
+        if (freshFirebaseToken && freshFirebaseToken !== activeToken) {
+          res = await submitWithBearer(freshFirebaseToken);
+        }
+      }
+
+      const data = await safeReadJson(res);
+
+      // Direct Firestore fallback ONLY if server Admin SDK is unavailable (503) and learner is signed in to Firebase Auth
+      if (res.status === 503 && auth.currentUser && auth.currentUser.uid === learner.id) {
+        const docId = `reg_${cohort.id}_${learner.id}_${selectedDate}`;
+        const isPrevDay = selectedDate < nairobiToday;
+        const savedRecord = await runTransaction(db, async (tx) => {
+          const ref = doc(db, 'dailyRegisters', docId);
+          const snap = await tx.get(ref);
+          if (snap.exists()) {
+            const existing = snap.data() as DailyRegister;
+            if (!isPrevDay) {
+              throw new Error('Your register for today has already been submitted.');
+            }
+            if (existing.status === 'absent' || existing.status === 'excused') {
+              throw new Error(
+                `A teacher marked you ${existing.status.toUpperCase()} on ${selectedDate}. Please contact your teacher to correct attendance.`
+              );
+            }
+            const mergedFirestoreDoc: Record<string, any> = {
+              ...existing,
+              status: existing.verificationStatus === 'corrected' ? existing.status : status,
+              didStudy,
+              nonStudyReason: payload.nonStudyReason ?? null,
+              learningAreaId: payload.learningAreaId ?? null,
+              learningAreaTitle: payload.learningAreaTitle ?? null,
+              moduleId: payload.moduleId ?? null,
+              moduleTitle: payload.moduleTitle ?? null,
+              topicId: payload.topicId ?? null,
+              topicTitle: payload.topicTitle ?? null,
+              topicDescription: payload.topicDescription ?? null,
+              understandingLevel: payload.understandingLevel ?? null,
+              reflectionLearned: payload.reflectionLearned || existing.reflectionLearned || null,
+              reflectionActivity: payload.reflectionActivity || existing.reflectionActivity || null,
+              reflectionDifficult: payload.reflectionDifficult || existing.reflectionDifficult || null,
+              reflectionTeacherExplain:
+                payload.reflectionTeacherExplain || existing.reflectionTeacherExplain || null,
+              timestamp: existing.timestamp || new Date().toISOString(),
+            };
+            tx.set(ref, mergedFirestoreDoc);
+            return mergedFirestoreDoc as DailyRegister;
+          }
+          const newFirestoreDoc: Record<string, any> = {
+            ...payload,
+            id: docId,
+            timestamp: new Date().toISOString(),
+            verificationStatus: 'pending_verification',
+            reflectionLearned: payload.reflectionLearned || null,
+            reflectionActivity: payload.reflectionActivity || null,
+            reflectionDifficult: payload.reflectionDifficult || null,
+            reflectionTeacherExplain: payload.reflectionTeacherExplain || null,
+            correctionHistory: [],
+          };
+          tx.set(ref, newFirestoreDoc);
+          return newFirestoreDoc as DailyRegister;
+        });
+
+        try {
+          confetti({ particleCount: 80, spread: 70, origin: { y: 0.6 } });
+        } catch {
+          // Confetti is optional visual polish
+        }
+        onSuccess(savedRecord);
+        return;
+      }
+
       if (!res.ok) {
-        throw new Error(data.error || 'Failed to submit daily register');
+        throw new Error(data.error || `Failed to submit daily register (HTTP ${res.status})`);
       }
 
       try {
@@ -577,7 +746,7 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
 
       onSuccess(data.register);
     } catch (err: any) {
-      setErrorMessage(err.message || 'Submission error');
+      setErrorMessage(err.message || 'Submission error. Please check your connection and try again.');
     } finally {
       setSubmitting(false);
     }
@@ -643,7 +812,7 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
         </div>
 
         {/* Modal Body */}
-        <div className="p-5 sm:p-6 flex-1 overflow-y-auto space-y-5">
+        <div ref={modalBodyRef} className="p-5 sm:p-6 flex-1 overflow-y-auto space-y-5">
           {errorMessage && (
             <div className="p-3.5 bg-rose-50 border border-rose-200 rounded-xl text-sm text-rose-800 flex items-center space-x-2">
               <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
@@ -924,7 +1093,11 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
                 </div>
                 <button
                   type="button"
-                  onClick={() => setUseCustomTopic((prev) => !prev)}
+                  onClick={() => {
+                    userModifiedTopicRef.current = true;
+                    setUseCustomTopic((prev) => !prev);
+                    setErrorMessage(null);
+                  }}
                   className="text-xs font-bold text-blue-800 hover:underline"
                 >
                   {useCustomTopic ? 'Choose from Curriculum / Timetable' : '+ Enter Other Area / Topic'}
@@ -941,7 +1114,10 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
                       type="text"
                       placeholder="e.g., Web Technology, Scratch Programming, Computer Fundamentals"
                       value={customAreaTitle}
-                      onChange={(e) => setCustomAreaTitle(e.target.value)}
+                      onChange={(e) => {
+                        userModifiedTopicRef.current = true;
+                        setCustomAreaTitle(e.target.value);
+                      }}
                       className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-sm font-semibold outline-none focus:ring-2 focus:ring-emerald-600"
                     />
                   </div>
@@ -953,7 +1129,10 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
                       type="text"
                       placeholder="e.g., Flexbox Layout Cards / Keyboard Typing Practice"
                       value={customTopicTitle}
-                      onChange={(e) => setCustomTopicTitle(e.target.value)}
+                      onChange={(e) => {
+                        userModifiedTopicRef.current = true;
+                        setCustomTopicTitle(e.target.value);
+                      }}
                       className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-sm font-semibold outline-none focus:ring-2 focus:ring-emerald-600"
                     />
                   </div>
@@ -969,7 +1148,10 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
                       <div className="flex flex-wrap gap-1.5">
                         <button
                           type="button"
-                          onClick={() => setSelectedAreaFilter('ALL')}
+                          onClick={() => {
+                            userModifiedTopicRef.current = true;
+                            setSelectedAreaFilter('ALL');
+                          }}
                           className={`px-2.5 py-1 rounded-lg text-xs font-bold border transition ${
                             selectedAreaFilter === 'ALL'
                               ? 'bg-emerald-700 text-white border-emerald-700'
@@ -983,6 +1165,7 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
                             key={area}
                             type="button"
                             onClick={() => {
+                              userModifiedTopicRef.current = true;
                               setSelectedAreaFilter(area);
                               const firstInArea = allTopics.find(
                                 (t) => t.learningArea.title === area
@@ -1027,7 +1210,10 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
                                   return (
                                     <div
                                       key={item.topic.id}
-                                      onClick={() => setSelectedTopicId(item.topic.id)}
+                                      onClick={() => {
+                                        userModifiedTopicRef.current = true;
+                                        setSelectedTopicId(item.topic.id);
+                                      }}
                                       className={`p-3.5 rounded-xl border-2 cursor-pointer transition-all ${
                                         isSelected
                                           ? 'border-emerald-600 bg-emerald-50/70 shadow-xs ring-1 ring-emerald-500'
@@ -1074,7 +1260,10 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
                                 return (
                                   <div
                                     key={item.topic.id}
-                                    onClick={() => setSelectedTopicId(item.topic.id)}
+                                    onClick={() => {
+                                      userModifiedTopicRef.current = true;
+                                      setSelectedTopicId(item.topic.id);
+                                    }}
                                     className={`p-3.5 rounded-xl border-2 cursor-pointer transition-all ${
                                       isSelected
                                         ? 'border-emerald-600 bg-emerald-50/70 shadow-xs ring-1 ring-emerald-500'
@@ -1408,6 +1597,14 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
             </div>
           )}
         </div>
+
+        {/* Sticky Error Feedback Above Footer */}
+        {errorMessage && (
+          <div className="px-4 py-2.5 bg-rose-50 border-t border-rose-200 text-xs sm:text-sm text-rose-800 font-semibold flex items-center space-x-2">
+            <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+            <span>{errorMessage}</span>
+          </div>
+        )}
 
         {/* Modal Footer Controls */}
         <div className="bg-slate-50 p-4 border-t border-slate-200 flex items-center justify-between">
