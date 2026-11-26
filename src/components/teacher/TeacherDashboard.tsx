@@ -46,8 +46,9 @@ interface TeacherDashboardProps {
   learners: Learner[];
   registers: DailyRegister[];
   onNavigate: (tab: TeacherTab) => void;
-  onVerifyRegister: (regId: string) => void;
+  onVerifyRegister: (regId: string) => Promise<void> | void;
   onSelectGradeFilter?: (levelFilter: string) => void;
+  onSelectSchoolFilter?: (schoolFilter: string) => void;
 }
 
 export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
@@ -59,6 +60,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
   onNavigate,
   onVerifyRegister,
   onSelectGradeFilter,
+  onSelectSchoolFilter,
 }) => {
   // Nairobi local date
   const nairobiToday = new Intl.DateTimeFormat('en-CA', {
@@ -171,12 +173,53 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
     color: bandColors[band.key].bar,
   }));
 
-  const distinctSchoolsCount = new Set(
-    learners.map((l) => (l.schoolName || 'Sangurur Comprehensive School').trim()).filter(Boolean)
-  ).size;
+  const schoolsBreakdown = useMemo(() => {
+    const groups = new Map<string, { name: string; count: number }>();
+    learners.forEach((l) => {
+      const raw = (l.schoolName || 'Sangurur Comprehensive School').trim().replace(/\s+/g, ' ');
+      const displayName = raw || 'Sangurur Comprehensive School';
+      const key = displayName.toLowerCase();
+      const existing = groups.get(key);
+      if (existing) {
+        existing.count += 1;
+        // Prefer properly capitalized display name if the first encountered was all lowercase
+        if (existing.name === existing.name.toLowerCase() && displayName !== displayName.toLowerCase()) {
+          existing.name = displayName;
+        }
+      } else {
+        groups.set(key, { name: displayName, count: 1 });
+      }
+    });
+    const total = learners.length;
+    return Array.from(groups.values())
+      .map((item) => ({
+        ...item,
+        percentage: total > 0 ? Math.round((item.count / total) * 100) : 0,
+      }))
+      .sort((a, b) => {
+        if (b.count !== a.count) return b.count - a.count;
+        return a.name.localeCompare(b.name);
+      });
+  }, [learners]);
+
+  const distinctSchoolsCount = schoolsBreakdown.length;
 
   const [topUnderstandingFilter, setTopUnderstandingFilter] = useState<'top' | 'excellent' | 'good'>('top');
   const [showAllTopTen, setShowAllTopTen] = useState(false);
+  const [verifyingId, setVerifyingId] = useState<string | null>(null);
+  const [verifyError, setVerifyError] = useState<string | null>(null);
+
+  const handleVerifyClick = async (regId: string) => {
+    setVerifyError(null);
+    setVerifyingId(regId);
+    try {
+      await onVerifyRegister(regId);
+    } catch (err: any) {
+      setVerifyError(err?.message || 'Unable to verify student register. Please try again.');
+    } finally {
+      setVerifyingId(null);
+    }
+  };
 
   const topPerformingStudents = useMemo(() => {
     const learnerById = new Map<string, Learner>();
@@ -360,7 +403,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
       </div>
 
       {/* Primary KPI Cards */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4">
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4">
         <div
           onClick={() => onNavigate('cohorts')}
           className="bg-white p-4 rounded-2xl border border-slate-200 shadow-xs hover:border-emerald-300 transition cursor-pointer"
@@ -387,6 +430,23 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
           </div>
           <p className="text-2xl font-black text-slate-900">{totalLearners}</p>
           <p className="text-xs text-blue-700 font-medium mt-1">Enrolled Students</p>
+        </div>
+
+        <div
+          onClick={() => {
+            if (onSelectSchoolFilter) onSelectSchoolFilter('all');
+            else onNavigate('learners');
+          }}
+          className="bg-white p-4 rounded-2xl border border-teal-200 shadow-xs hover:border-teal-400 transition cursor-pointer"
+        >
+          <div className="flex items-center justify-between text-teal-700 mb-1">
+            <span className="text-xs font-bold uppercase tracking-wider">Schools</span>
+            <School className="w-4 h-4 text-teal-600" />
+          </div>
+          <p className="text-2xl font-black text-slate-900">{distinctSchoolsCount}</p>
+          <p className="text-xs text-teal-700 font-medium mt-1">
+            {distinctSchoolsCount === 1 ? 'Participating School' : 'Schools Represented'}
+          </p>
         </div>
 
         <div
@@ -532,6 +592,86 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
           <p className="text-xs text-slate-500">
             * {levelCounts.unspecified} learner{levelCounts.unspecified === 1 ? '' : 's'} currently have no specific grade recorded.
           </p>
+        )}
+      </div>
+
+      {/* Participating Schools Breakdown */}
+      <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-xs space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+          <div>
+            <div className="flex items-center space-x-2">
+              <School className="w-5 h-5 text-teal-700" />
+              <h3 className="font-extrabold text-base text-slate-900">
+                Learners by Participating School ({distinctSchoolsCount}{' '}
+                {distinctSchoolsCount === 1 ? 'School' : 'Schools'})
+              </h3>
+            </div>
+            <p className="text-sm text-slate-500 mt-0.5">
+              Number of schools from which enrolled learners are from — click any school to view and manage its students.
+            </p>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => {
+              if (onSelectSchoolFilter) onSelectSchoolFilter('all');
+              else onNavigate('learners');
+            }}
+            className="text-sm font-bold text-teal-700 hover:text-teal-800 flex items-center space-x-1 self-start sm:self-auto"
+          >
+            <span>View All Schools</span>
+            <ArrowUpRight className="w-4 h-4" />
+          </button>
+        </div>
+
+        {schoolsBreakdown.length === 0 ? (
+          <div className="p-6 text-center text-sm text-slate-500 bg-slate-50 rounded-xl border border-slate-200">
+            No learners registered yet. Register learners to view participating school counts.
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+            {schoolsBreakdown.map((school) => (
+              <button
+                key={school.name.toLowerCase()}
+                type="button"
+                onClick={() => {
+                  if (onSelectSchoolFilter) onSelectSchoolFilter(school.name);
+                  else onNavigate('learners');
+                }}
+                className="text-left p-3.5 rounded-xl border border-slate-200 hover:border-teal-400 bg-slate-50/60 hover:bg-teal-50/40 transition cursor-pointer space-y-2"
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <span className="text-sm font-extrabold text-slate-900 leading-snug line-clamp-2">
+                    {school.name}
+                  </span>
+                  <span className="px-2 py-0.5 rounded-md bg-teal-100 text-teal-900 text-xs font-extrabold shrink-0">
+                    {school.count} {school.count === 1 ? 'Learner' : 'Learners'}
+                  </span>
+                </div>
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between text-xs text-slate-500 font-semibold">
+                    <span>Share of Enrollment</span>
+                    <span className="text-slate-700 font-bold">{school.percentage}%</span>
+                  </div>
+                  <svg
+                    viewBox="0 0 100 6"
+                    preserveAspectRatio="none"
+                    className="h-1.5 w-full rounded-full bg-slate-200 block overflow-hidden"
+                    aria-label={`${school.name}: ${school.percentage}%`}
+                  >
+                    <rect
+                      x="0"
+                      y="0"
+                      width={school.percentage}
+                      height="6"
+                      rx="3"
+                      className="fill-teal-600"
+                    />
+                  </svg>
+                </div>
+              </button>
+            ))}
+          </div>
         )}
       </div>
 
@@ -817,6 +957,19 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
             </button>
           </div>
 
+          {verifyError && (
+            <div className="mx-4 mt-3 p-2.5 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-800 flex items-center justify-between gap-2">
+              <span>{verifyError}</span>
+              <button
+                type="button"
+                onClick={() => setVerifyError(null)}
+                className="font-bold text-rose-600 hover:text-rose-800 shrink-0"
+              >
+                Dismiss
+              </button>
+            </div>
+          )}
+
           <div className="divide-y divide-slate-100 max-h-64 overflow-y-auto">
             {pendingReviews.length === 0 ? (
               <div className="p-6 text-center text-sm text-slate-500">
@@ -836,10 +989,12 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
                     </p>
                   </div>
                   <button
-                    onClick={() => onVerifyRegister(r.id)}
-                    className="py-1.5 px-3 bg-emerald-100 hover:bg-emerald-200 text-emerald-800 font-bold rounded-lg text-sm transition"
+                    type="button"
+                    disabled={verifyingId === r.id}
+                    onClick={() => handleVerifyClick(r.id)}
+                    className="py-1.5 px-3 bg-emerald-100 hover:bg-emerald-200 disabled:opacity-50 text-emerald-800 font-bold rounded-lg text-sm transition"
                   >
-                    Verify
+                    {verifyingId === r.id ? 'Verifying...' : 'Verify'}
                   </button>
                 </div>
               ))

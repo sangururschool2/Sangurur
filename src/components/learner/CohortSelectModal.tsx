@@ -1,5 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../../context/AuthContext';
+import { auth } from '../../services/firebase';
+import { learnerFetch } from '../../utils/authHeaders';
 import { Cohort, CohortLevel, CohortClass } from '../../types';
 import {
   Users,
@@ -44,16 +46,14 @@ export const CohortSelectModal: React.FC<CohortSelectModalProps> = ({ onSelected
 
   useEffect(() => {
     async function loadAssigned() {
-      if (!learnerProfile || !learnerToken) {
+      if (!learnerProfile || (!learnerToken && !auth.currentUser)) {
         setLoading(false);
         return;
       }
       setLoading(true);
       setError(null);
       try {
-        const res = await fetch('/api/learner/cohorts', {
-          headers: { Authorization: `Bearer ${learnerToken}` },
-        });
+        const res = await learnerFetch('/api/learner/cohorts', learnerToken);
         const data = await res.json();
         if (!res.ok) {
           throw new Error(data.error || 'Could not load your assigned cohorts.');

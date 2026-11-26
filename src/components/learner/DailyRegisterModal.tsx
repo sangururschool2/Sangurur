@@ -3,6 +3,7 @@ import confetti from 'canvas-confetti';
 import { doc, runTransaction } from 'firebase/firestore';
 import { auth, db } from '../../services/firebase';
 import { useAuth } from '../../context/AuthContext';
+import { learnerFetch } from '../../utils/authHeaders';
 import {
   Cohort,
   CohortLevel,
@@ -105,10 +106,8 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
   const [allowReflections, setAllowReflections] = useState<boolean>(true);
 
   useEffect(() => {
-    if (!learnerToken) return;
-    fetch('/api/learner/settings', {
-      headers: { Authorization: `Bearer ${learnerToken}` },
-    })
+    if (!learnerToken && !auth.currentUser) return;
+    learnerFetch('/api/learner/settings', learnerToken)
       .then((res) => (res.ok ? res.json() : null))
       .then((json) => {
         if (json?.settings) {
@@ -183,12 +182,10 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
 
   // Load weekly timetable entries scoped to cohort + class via authenticated learner API
   useEffect(() => {
-    if (!learnerToken) return;
+    if (!learnerToken && !auth.currentUser) return;
     let cancelled = false;
     const classQuery = cohortClass?.id ? `&classId=${encodeURIComponent(cohortClass.id)}` : '';
-    fetch(`/api/learner/timetable?cohortId=${encodeURIComponent(cohort.id)}${classQuery}`, {
-      headers: { Authorization: `Bearer ${learnerToken}` },
-    })
+    learnerFetch(`/api/learner/timetable?cohortId=${encodeURIComponent(cohort.id)}${classQuery}`, learnerToken)
       .then((res) => (res.ok ? res.json() : { entries: [] }))
       .then((json) => {
         if (!cancelled) setTimetableEntries(json.entries || []);
@@ -637,32 +634,14 @@ export const DailyRegisterModal: React.FC<DailyRegisterModalProps> = ({
       reflectionTeacherExplain: allowReflections ? reflectionTeacherExplain : '',
     };
 
-    const submitWithBearer = async (bearerToken: string | null) => {
-      return fetch('/api/attendance/submit', {
+    try {
+      const res = await learnerFetch('/api/attendance/submit', learnerToken, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          ...(bearerToken ? { Authorization: `Bearer ${bearerToken}` } : {}),
         },
         body: JSON.stringify(payload),
       });
-    };
-
-    try {
-      let activeToken: string | null = learnerToken;
-      if (!activeToken && auth.currentUser) {
-        activeToken = await auth.currentUser.getIdToken();
-      }
-
-      let res = await submitWithBearer(activeToken);
-
-      // If HMAC session token failed (e.g. cold serverless instance / rotated secret), retry with fresh Firebase ID token
-      if (res.status === 401 && auth.currentUser) {
-        const freshFirebaseToken = await auth.currentUser.getIdToken(true);
-        if (freshFirebaseToken && freshFirebaseToken !== activeToken) {
-          res = await submitWithBearer(freshFirebaseToken);
-        }
-      }
 
       const data = await safeReadJson(res);
 

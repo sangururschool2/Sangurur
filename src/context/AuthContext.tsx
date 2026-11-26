@@ -13,9 +13,36 @@ import {
 } from 'firebase/auth';
 import { doc, getDoc, setDoc } from 'firebase/firestore';
 import { Teacher, Learner, Cohort, UserRole } from '../types';
+import { learnerFetch, teacherFetch } from '../utils/authHeaders';
+
+const LOCAL_SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 
 const LEARNER_SESSION_KEY = 'sdlr_learner_session';
 const TEACHER_SESSION_KEY = 'sdlr_teacher_session';
+
+function safeStorageGet(key: string): string | null {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function safeStorageSet(key: string, value: string): void {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    // Ignore storage quota or restricted iframe errors
+  }
+}
+
+function safeStorageRemove(key: string): void {
+  try {
+    localStorage.removeItem(key);
+  } catch {
+    // Ignore storage access errors
+  }
+}
 
 interface StoredLearnerSession {
   token: string;
@@ -69,40 +96,40 @@ async function readApiJson(response: Response): Promise<any> {
 
 function readStoredLearnerSession(): StoredLearnerSession | null {
   try {
-    const raw = localStorage.getItem(LEARNER_SESSION_KEY);
+    const raw = safeStorageGet(LEARNER_SESSION_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw);
     if (parsed && parsed.token && parsed.learner && parsed.expiresAt) {
       if (Date.now() > parsed.expiresAt) {
-        localStorage.removeItem(LEARNER_SESSION_KEY);
+        safeStorageRemove(LEARNER_SESSION_KEY);
         return null;
       }
       return parsed as StoredLearnerSession;
     }
-    localStorage.removeItem(LEARNER_SESSION_KEY);
+    safeStorageRemove(LEARNER_SESSION_KEY);
     return null;
   } catch {
-    localStorage.removeItem(LEARNER_SESSION_KEY);
+    safeStorageRemove(LEARNER_SESSION_KEY);
     return null;
   }
 }
 
 function readStoredTeacherSession(): StoredTeacherSession | null {
   try {
-    const raw = localStorage.getItem(TEACHER_SESSION_KEY);
+    const raw = safeStorageGet(TEACHER_SESSION_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw);
     if (parsed && parsed.token && parsed.teacher && parsed.expiresAt) {
       if (Date.now() > parsed.expiresAt) {
-        localStorage.removeItem(TEACHER_SESSION_KEY);
+        safeStorageRemove(TEACHER_SESSION_KEY);
         return null;
       }
       return parsed as StoredTeacherSession;
     }
-    localStorage.removeItem(TEACHER_SESSION_KEY);
+    safeStorageRemove(TEACHER_SESSION_KEY);
     return null;
   } catch {
-    localStorage.removeItem(TEACHER_SESSION_KEY);
+    safeStorageRemove(TEACHER_SESSION_KEY);
     return null;
   }
 }
@@ -117,6 +144,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [activeCohort, setActiveCohort] = useState<Cohort | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const googleSignInInFlightRef = useRef<boolean>(false);
+  const sessionVersionRef = useRef<number>(0);
 
   // Restore and live-validate learner session with server on mount
   useEffect(() => {
@@ -125,34 +153,40 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     async function validateSavedLearner() {
       const saved = readStoredLearnerSession();
       if (!saved) return;
+      const startGen = sessionVersionRef.current;
 
       try {
-        const res = await fetch('/api/auth/learner-session', {
-          headers: { Authorization: `Bearer ${saved.token}` },
-        });
+        const res = await learnerFetch('/api/auth/learner-session', saved.token);
+        if (cancelled || sessionVersionRef.current !== startGen) return;
         if (!res.ok) {
-          localStorage.removeItem(LEARNER_SESSION_KEY);
-          if (!cancelled) {
+          if (res.status === 401 || res.status === 403) {
+            safeStorageRemove(LEARNER_SESSION_KEY);
             setLearnerProfile(null);
             setLearnerToken(null);
             setRole((prev) => (prev === 'learner' ? null : prev));
+          } else {
+            setLearnerToken(saved.token);
+            setLearnerProfile(saved.learner);
+            setRole('learner');
           }
           return;
         }
         const data = await readApiJson(res);
-        if (!cancelled && data.learner) {
+        if (!cancelled && sessionVersionRef.current === startGen && data.learner) {
+          const nextToken = data.token || saved.token;
+          const nextExpiresAt = data.expiresAt || saved.expiresAt;
           const updatedSession: StoredLearnerSession = {
-            token: saved.token,
-            expiresAt: saved.expiresAt,
+            token: nextToken,
+            expiresAt: nextExpiresAt,
             learner: data.learner,
           };
-          localStorage.setItem(LEARNER_SESSION_KEY, JSON.stringify(updatedSession));
-          setLearnerToken(saved.token);
+          safeStorageSet(LEARNER_SESSION_KEY, JSON.stringify(updatedSession));
+          setLearnerToken(nextToken);
           setLearnerProfile(data.learner);
           setRole('learner');
         }
       } catch {
-        if (!cancelled) {
+        if (!cancelled && sessionVersionRef.current === startGen) {
           setLearnerToken(saved.token);
           setLearnerProfile(saved.learner);
           setRole('learner');
@@ -173,37 +207,43 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     async function validateSavedTeacher() {
       const saved = readStoredTeacherSession();
       if (!saved) return;
+      const startGen = sessionVersionRef.current;
 
       try {
-        const res = await fetch('/api/auth/teacher-session', {
-          headers: { Authorization: `Bearer ${saved.token}` },
-        });
+        const res = await teacherFetch('/api/auth/teacher-session', saved.token);
+        if (cancelled || sessionVersionRef.current !== startGen) return;
         if (!res.ok) {
-          localStorage.removeItem(TEACHER_SESSION_KEY);
-          if (!cancelled) {
+          if (res.status === 401 || res.status === 403) {
+            safeStorageRemove(TEACHER_SESSION_KEY);
             setTeacherToken(null);
             setTeacherProfile(null);
             setRole((prev) => (prev && prev !== 'learner' ? null : prev));
+          } else {
+            setTeacherToken(saved.token);
+            setTeacherProfile(saved.teacher);
+            setRole(saved.teacher.role || 'teacher');
           }
           return;
         }
         const data = await readApiJson(res);
-        if (!cancelled && data.teacher) {
+        if (!cancelled && sessionVersionRef.current === startGen && data.teacher) {
           if (data.firebaseCustomToken && !auth.currentUser) {
             signInWithCustomToken(auth, data.firebaseCustomToken).catch(() => {});
           }
+          const nextToken = data.token || saved.token;
+          const nextExpiresAt = data.expiresAt || saved.expiresAt;
           const updatedSession: StoredTeacherSession = {
-            token: saved.token,
-            expiresAt: saved.expiresAt,
+            token: nextToken,
+            expiresAt: nextExpiresAt,
             teacher: data.teacher,
           };
-          localStorage.setItem(TEACHER_SESSION_KEY, JSON.stringify(updatedSession));
-          setTeacherToken(saved.token);
+          safeStorageSet(TEACHER_SESSION_KEY, JSON.stringify(updatedSession));
+          setTeacherToken(nextToken);
           setTeacherProfile(data.teacher);
           setRole(data.teacher.role || 'teacher');
         }
       } catch {
-        if (!cancelled) {
+        if (!cancelled && sessionVersionRef.current === startGen) {
           setTeacherToken(saved.token);
           setTeacherProfile(saved.teacher);
           setRole(saved.teacher.role || 'teacher');
@@ -230,9 +270,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           return;
         }
 
+        const startGen = sessionVersionRef.current;
         setFirebaseUser(user);
-        localStorage.removeItem(LEARNER_SESSION_KEY);
-        localStorage.removeItem(TEACHER_SESSION_KEY);
+        safeStorageRemove(LEARNER_SESSION_KEY);
+        safeStorageRemove(TEACHER_SESSION_KEY);
         setLearnerProfile(null);
         setLearnerToken(null);
         setTeacherToken(null);
@@ -240,6 +281,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         try {
           const teacherDocRef = doc(db, 'teachers', user.uid);
           const snap = await getDoc(teacherDocRef);
+          if (sessionVersionRef.current !== startGen) return;
 
           const isBootstrapAdmin =
             user.email === 'sangururschool10@gmail.com' ||
@@ -254,6 +296,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
                 updatedAt: new Date().toISOString(),
               };
               await setDoc(teacherDocRef, upgraded);
+              if (sessionVersionRef.current !== startGen) return;
               setTeacherProfile(upgraded);
               setRole('admin');
             } else {
@@ -270,10 +313,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
               createdAt: new Date().toISOString(),
             };
             await setDoc(teacherDocRef, newTeacher);
+            if (sessionVersionRef.current !== startGen) return;
             setTeacherProfile(newTeacher);
             setRole(newTeacher.role);
           }
         } catch (err) {
+          if (sessionVersionRef.current !== startGen) return;
           console.error('Error fetching teacher profile:', err);
           const isBootstrapAdmin =
             user.email === 'sangururschool10@gmail.com' ||
@@ -310,10 +355,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       return;
     }
     googleSignInInFlightRef.current = true;
+    sessionVersionRef.current += 1;
     try {
       await signInWithPopup(auth, googleProvider);
-      localStorage.removeItem(LEARNER_SESSION_KEY);
-      localStorage.removeItem(TEACHER_SESSION_KEY);
+      safeStorageRemove(LEARNER_SESSION_KEY);
+      safeStorageRemove(TEACHER_SESSION_KEY);
       setLearnerProfile(null);
       setLearnerToken(null);
       setTeacherToken(null);
@@ -368,6 +414,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       throw new Error(data.error || `Failed to authenticate teacher account (HTTP ${response.status})`);
     }
 
+    sessionVersionRef.current += 1;
+    if (auth.currentUser && auth.currentUser.uid !== data.teacher?.uid) {
+      await fbSignOut(auth).catch(() => {});
+    }
     if (data.firebaseCustomToken) {
       try {
         await signInWithCustomToken(auth, data.firebaseCustomToken);
@@ -378,17 +428,17 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     const sessionObj: StoredTeacherSession = {
       token: data.token,
-      expiresAt: data.expiresAt || Date.now() + 12 * 60 * 60 * 1000,
+      expiresAt: data.expiresAt || Date.now() + LOCAL_SESSION_TTL_MS,
       teacher: data.teacher,
     };
 
-    localStorage.removeItem(LEARNER_SESSION_KEY);
+    safeStorageRemove(LEARNER_SESSION_KEY);
     setLearnerProfile(null);
     setLearnerToken(null);
     setTeacherProfile(data.teacher);
     setTeacherToken(data.token);
     setRole(data.teacher.role || 'teacher');
-    localStorage.setItem(TEACHER_SESSION_KEY, JSON.stringify(sessionObj));
+    safeStorageSet(TEACHER_SESSION_KEY, JSON.stringify(sessionObj));
   };
 
   // Learner Login
@@ -404,27 +454,34 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       throw new Error(data.error || `Failed to authenticate learner account (HTTP ${response.status})`);
     }
 
+    sessionVersionRef.current += 1;
+    if (auth.currentUser && auth.currentUser.uid !== data.learner?.id) {
+      await fbSignOut(auth).catch(() => {});
+    }
     if (data.firebaseCustomToken) {
       try {
         await signInWithCustomToken(auth, data.firebaseCustomToken);
       } catch (customErr) {
         console.warn('Firebase custom token sign-in notice:', customErr);
+        if (auth.currentUser && auth.currentUser.uid !== data.learner?.id) {
+          await fbSignOut(auth).catch(() => {});
+        }
       }
     }
 
     const sessionObj: StoredLearnerSession = {
       token: data.token,
-      expiresAt: data.expiresAt || Date.now() + 12 * 60 * 60 * 1000,
+      expiresAt: data.expiresAt || Date.now() + LOCAL_SESSION_TTL_MS,
       learner: data.learner,
     };
 
-    localStorage.removeItem(TEACHER_SESSION_KEY);
+    safeStorageRemove(TEACHER_SESSION_KEY);
     setTeacherProfile(null);
     setTeacherToken(null);
     setLearnerProfile(data.learner);
     setLearnerToken(data.token);
     setRole('learner');
-    localStorage.setItem(LEARNER_SESSION_KEY, JSON.stringify(sessionObj));
+    safeStorageSet(LEARNER_SESSION_KEY, JSON.stringify(sessionObj));
 
     return {
       success: true,
@@ -435,15 +492,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   // Change Learner Password
   const changeLearnerPassword = async (newPassword: string, currentPassword?: string) => {
-    if (!learnerProfile || !learnerToken) {
+    if (!learnerProfile || (!learnerToken && !auth.currentUser)) {
       throw new Error('Active learner session not found. Please sign in again.');
     }
 
-    const res = await fetch('/api/auth/learner-change-password', {
+    const res = await learnerFetch('/api/auth/learner-change-password', learnerToken, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${learnerToken}`,
       },
       body: JSON.stringify({
         learnerId: learnerProfile.id,
@@ -457,6 +513,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       throw new Error(data.error || 'Could not change password');
     }
 
+    sessionVersionRef.current += 1;
     const updated: Learner = {
       ...learnerProfile,
       mustChangePassword: false,
@@ -464,38 +521,41 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     };
     setLearnerProfile(updated);
 
-    const nextToken = data.token || learnerToken;
-    const nextExpiresAt = data.expiresAt || readStoredLearnerSession()?.expiresAt || Date.now() + 12 * 60 * 60 * 1000;
+    const nextToken = data.token || learnerToken || '';
+    const nextExpiresAt = data.expiresAt || Date.now() + LOCAL_SESSION_TTL_MS;
     if (data.token) {
       setLearnerToken(data.token);
     }
 
-    localStorage.setItem(
+    safeStorageSet(
       LEARNER_SESSION_KEY,
       JSON.stringify({ token: nextToken, expiresAt: nextExpiresAt, learner: updated })
     );
   };
 
   const refreshLearnerData = async () => {
-    if (!learnerToken) return;
+    if (!learnerToken && !auth.currentUser) return;
     try {
-      const res = await fetch('/api/auth/learner-session', {
-        headers: { Authorization: `Bearer ${learnerToken}` },
-      });
+      const res = await learnerFetch('/api/auth/learner-session', learnerToken);
       if (!res.ok) {
-        await logout();
+        if (res.status === 401 || res.status === 403) {
+          await logout();
+        }
         return;
       }
       const data = await readApiJson(res);
       if (data.learner) {
         setLearnerProfile(data.learner);
         const saved = readStoredLearnerSession();
-        if (saved) {
-          localStorage.setItem(
-            LEARNER_SESSION_KEY,
-            JSON.stringify({ ...saved, learner: data.learner })
-          );
+        const nextToken = data.token || saved?.token || learnerToken || '';
+        const nextExpiresAt = data.expiresAt || saved?.expiresAt || Date.now() + LOCAL_SESSION_TTL_MS;
+        if (data.token) {
+          setLearnerToken(data.token);
         }
+        safeStorageSet(
+          LEARNER_SESSION_KEY,
+          JSON.stringify({ token: nextToken, expiresAt: nextExpiresAt, learner: data.learner })
+        );
       }
     } catch (e) {
       console.error('Error refreshing learner data:', e);
@@ -504,9 +564,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   // Logout (invalidates server session token + clears local state + Firebase Auth)
   const logout = async () => {
+    sessionVersionRef.current += 1;
     const activeToken = teacherToken || learnerToken;
-    localStorage.removeItem(LEARNER_SESSION_KEY);
-    localStorage.removeItem(TEACHER_SESSION_KEY);
+    safeStorageRemove(LEARNER_SESSION_KEY);
+    safeStorageRemove(TEACHER_SESSION_KEY);
     setLearnerProfile(null);
     setLearnerToken(null);
     setTeacherProfile(null);

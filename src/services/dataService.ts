@@ -16,6 +16,7 @@ import {
   where,
   orderBy,
 } from 'firebase/firestore';
+import { teacherFetch } from '../utils/authHeaders';
 import {
   Cohort,
   Learner,
@@ -703,7 +704,49 @@ export async function getDailyRegisters(filters?: {
   }
 }
 
-export async function verifyDailyRegister(registerId: string, teacherId: string): Promise<void> {
+function isAdminSdkUnavailableResponse(status: number, body: any): boolean {
+  return (
+    status === 503 ||
+    body?.code === 'MISSING_ADMIN_SDK' ||
+    body?.code === 'MISSING_SERVICE_ACCOUNT_JSON' ||
+    body?.code === 'FIREBASE_ADMIN_AUTH_FAILED'
+  );
+}
+
+export async function verifyDailyRegister(
+  registerId: string,
+  teacherId: string,
+  teacherToken?: string | null
+): Promise<void> {
+  let shouldFallbackToFirestore = false;
+
+  try {
+    const res = await teacherFetch('/api/attendance/verify', teacherToken, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ registerId }),
+    });
+
+    const data = await res.json().catch(() => ({}));
+    if (res.ok) {
+      return;
+    }
+
+    if (isAdminSdkUnavailableResponse(res.status, data) && auth.currentUser) {
+      shouldFallbackToFirestore = true;
+    } else {
+      throw new Error(data.error || `Failed to verify register (HTTP ${res.status})`);
+    }
+  } catch (err: any) {
+    if (err instanceof TypeError && auth.currentUser) {
+      shouldFallbackToFirestore = true;
+    } else if (!shouldFallbackToFirestore) {
+      throw err;
+    }
+  }
+
+  if (!shouldFallbackToFirestore) return;
+
   try {
     const ref = doc(db, 'dailyRegisters', registerId);
     await updateDoc(ref, {
@@ -722,8 +765,42 @@ export async function correctAttendance(
   newStatus: AttendanceStatus,
   reason: string,
   teacherId: string,
-  teacherName: string
+  teacherName: string,
+  teacherToken?: string | null
 ): Promise<void> {
+  let shouldFallbackToFirestore = false;
+
+  try {
+    const res = await teacherFetch('/api/attendance/correct', teacherToken, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        registerId: register.id,
+        newStatus,
+        reason,
+      }),
+    });
+
+    const data = await res.json().catch(() => ({}));
+    if (res.ok) {
+      return;
+    }
+
+    if (isAdminSdkUnavailableResponse(res.status, data) && auth.currentUser) {
+      shouldFallbackToFirestore = true;
+    } else {
+      throw new Error(data.error || `Failed to correct attendance (HTTP ${res.status})`);
+    }
+  } catch (err: any) {
+    if (err instanceof TypeError && auth.currentUser) {
+      shouldFallbackToFirestore = true;
+    } else if (!shouldFallbackToFirestore) {
+      throw err;
+    }
+  }
+
+  if (!shouldFallbackToFirestore) return;
+
   try {
     const ref = doc(db, 'dailyRegisters', register.id);
     const correction: CorrectionRecord = {
@@ -761,18 +838,52 @@ export async function correctAttendance(
   }
 }
 
-export async function logTeacherAttendanceEntry(entry: {
-  cohortId: string;
-  cohortCode: string;
-  learnerDocId: string;
-  learnerId: string;
-  learnerName: string;
-  date: string;
-  status: 'absent' | 'excused';
-  teacherId: string;
-  teacherName: string;
-  reason?: string;
-}): Promise<DailyRegister> {
+export async function logTeacherAttendanceEntry(
+  entry: {
+    cohortId: string;
+    cohortCode: string;
+    learnerDocId: string;
+    learnerId: string;
+    learnerName: string;
+    date: string;
+    status: 'absent' | 'excused';
+    teacherId: string;
+    teacherName: string;
+    reason?: string;
+  },
+  teacherToken?: string | null
+): Promise<DailyRegister> {
+  let shouldFallbackToFirestore = false;
+
+  try {
+    const res = await teacherFetch('/api/attendance/mark', teacherToken, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(entry),
+    });
+
+    const data = await res.json().catch(() => ({}));
+    if (res.ok && data.register) {
+      return data.register as DailyRegister;
+    }
+
+    if (isAdminSdkUnavailableResponse(res.status, data) && auth.currentUser) {
+      shouldFallbackToFirestore = true;
+    } else {
+      throw new Error(data.error || `Failed to log attendance entry (HTTP ${res.status})`);
+    }
+  } catch (err: any) {
+    if (err instanceof TypeError && auth.currentUser) {
+      shouldFallbackToFirestore = true;
+    } else if (!shouldFallbackToFirestore) {
+      throw err;
+    }
+  }
+
+  if (!shouldFallbackToFirestore) {
+    throw new Error('Failed to record attendance entry.');
+  }
+
   const docId = `reg_${entry.cohortId}_${entry.learnerDocId}_${entry.date}`;
   const docRef = doc(db, 'dailyRegisters', docId);
 
@@ -2006,10 +2117,12 @@ export async function createLearnerDirect(params: {
     let digitalId = '';
     if (params.customDigitalId && params.customDigitalId.trim()) {
       digitalId = params.customDigitalId.trim().toUpperCase();
-      const dupSnap = await getDocs(
-        query(collection(db, 'learners'), where('digitalId', '==', digitalId))
-      );
-      if (!dupSnap.empty) {
+      const [dupByDigital, dupByUsername, dupByLearnerId] = await Promise.all([
+        getDocs(query(collection(db, 'learners'), where('digitalId', '==', digitalId))),
+        getDocs(query(collection(db, 'learners'), where('username', '==', digitalId))),
+        getDocs(query(collection(db, 'learners'), where('learnerId', '==', digitalId))),
+      ]);
+      if (!dupByDigital.empty || !dupByUsername.empty || !dupByLearnerId.empty) {
         throw new Error(`Digital ID ${digitalId} is already assigned to another learner.`);
       }
     } else {
@@ -2247,6 +2360,19 @@ export async function resetLearnerPasswordDirect(params: {
     const salt = generateBrowserSalt();
     const passwordHash = await hashPasswordBrowser(DEFAULT_INITIAL_LEARNER_PASSWORD, salt);
 
+    let resetTimestamp = Date.now();
+    try {
+      const timeRes = await fetch('/api/health', { method: 'HEAD' });
+      const dateHeader = timeRes.headers.get('date');
+      if (dateHeader) {
+        const parsed = Date.parse(dateHeader);
+        if (Number.isFinite(parsed) && parsed > 0) {
+          resetTimestamp = parsed;
+        }
+      }
+    } catch {
+      // Fallback to local clock if offline
+    }
     await updateDoc(learnerRef, {
       passwordHash,
       salt,
@@ -2254,8 +2380,9 @@ export async function resetLearnerPasswordDirect(params: {
       isFirstLogin: true,
       status: 'ACTIVE',
       active: true,
-      sessionRevokedAt: Date.now(),
-      updatedAt: new Date().toISOString(),
+      sessionRevokedAt: resetTimestamp,
+      passwordResetAt: resetTimestamp,
+      updatedAt: new Date(resetTimestamp).toISOString(),
     });
 
     const digitalId = String(learnerData.digitalId || learnerData.learnerId || '');
@@ -2279,6 +2406,208 @@ export async function resetLearnerPasswordDirect(params: {
       throw error;
     }
     handleFirestoreError(error, OperationType.UPDATE, `learners/${params.learnerId}`);
+    throw error;
+  }
+}
+
+export async function updateLearnerDirect(params: {
+  learnerId: string;
+  fullName: string;
+  schoolName?: string;
+  grade?: string;
+  cohortId?: string;
+  levelId?: string;
+  levelName?: string;
+  classId?: string;
+  className?: string;
+  gender?: 'male' | 'female' | 'other' | 'prefer_not_to_say' | '';
+  age?: number | null;
+  guardianContact?: string;
+  status?: 'ACTIVE' | 'INACTIVE' | 'ARCHIVED';
+  teacherId: string;
+  teacherName: string;
+  teacherRole?: string;
+}): Promise<Learner> {
+  if (!auth.currentUser) {
+    throw new Error('Staff authentication required. Please sign in again.');
+  }
+
+  try {
+    const learnerRef = doc(db, 'learners', params.learnerId);
+    const snap = await getDoc(learnerRef);
+    if (!snap.exists()) {
+      throw new Error('Learner account not found');
+    }
+    const existingLearner = snap.data() as Record<string, any>;
+
+    const cleanName = params.fullName.trim();
+    if (!cleanName) {
+      throw new Error('Full name is required');
+    }
+
+    const existingCohorts: string[] = Array.isArray(existingLearner.assignedCohortIds)
+      ? existingLearner.assignedCohortIds.filter(Boolean).map((c: any) => String(c))
+      : [];
+    const targetCohortId = params.cohortId?.trim() || existingCohorts[0] || '';
+
+    if (targetCohortId) {
+      const cohortSnap = await getDoc(doc(db, 'cohorts', targetCohortId));
+      if (!cohortSnap.exists()) {
+        throw new Error('Selected cohort was not found.');
+      }
+    }
+
+    let resolvedLevelId: string | null = params.levelId?.trim() || null;
+    let resolvedLevelName: string | null = params.levelName?.trim() || null;
+    let resolvedClassId: string | null = params.classId?.trim() || null;
+    let resolvedClassName: string | null = params.className?.trim() || null;
+
+    if (resolvedClassId) {
+      const classSnap = await getDoc(doc(db, 'cohortClasses', resolvedClassId));
+      if (classSnap.exists()) {
+        const clsData = classSnap.data() as CohortClass;
+        if (!targetCohortId || clsData.cohortId === targetCohortId) {
+          resolvedClassId = classSnap.id;
+          resolvedClassName = clsData.name;
+          resolvedLevelId = clsData.levelId;
+          resolvedLevelName = clsData.levelName;
+        } else {
+          resolvedClassId = null;
+          resolvedClassName = null;
+          resolvedLevelId = null;
+          resolvedLevelName = null;
+        }
+      }
+    }
+
+    const oldPrimaryCohortId = existingCohorts[0] || '';
+    const updatedAssignedCohortIds = targetCohortId
+      ? Array.from(
+          new Set([
+            targetCohortId,
+            ...existingCohorts.filter((c) => c !== oldPrimaryCohortId && c !== targetCohortId),
+          ])
+        )
+      : existingCohorts;
+
+    const normalizedSchool = params.schoolName?.trim() || 'Sangurur Comprehensive School';
+    const normalizedGrade = params.grade?.trim() || null;
+    const normalizedStatus = params.status || (existingLearner.status as 'ACTIVE' | 'INACTIVE' | 'ARCHIVED') || 'ACTIVE';
+    const nowIso = new Date().toISOString();
+
+    const updatePayload = stripUndefinedDeep({
+      fullName: cleanName,
+      schoolName: normalizedSchool,
+      grade: normalizedGrade,
+      gender: params.gender || null,
+      age: params.age !== undefined && params.age !== null && Number.isFinite(Number(params.age)) ? Number(params.age) : null,
+      guardianContact: params.guardianContact?.trim() || null,
+      assignedCohortIds: updatedAssignedCohortIds,
+      assignedClassIds: resolvedClassId ? [resolvedClassId] : [],
+      levelId: resolvedLevelId,
+      levelName: resolvedLevelName,
+      classId: resolvedClassId,
+      className: resolvedClassName,
+      status: normalizedStatus,
+      active: normalizedStatus === 'ACTIVE',
+      updatedAt: nowIso,
+    });
+
+    await updateDoc(learnerRef, updatePayload);
+
+    if (oldPrimaryCohortId && targetCohortId && oldPrimaryCohortId !== targetCohortId) {
+      await deleteDoc(doc(db, 'cohortMembers', `mem_${oldPrimaryCohortId}_${params.learnerId}`)).catch(() => {});
+    }
+    if (targetCohortId) {
+      const memberId = `mem_${targetCohortId}_${params.learnerId}`;
+      const digitalId = String(existingLearner.digitalId || existingLearner.learnerId || existingLearner.username || '');
+      await setDoc(doc(db, 'cohortMembers', memberId), {
+        id: memberId,
+        cohortId: targetCohortId,
+        learnerId: params.learnerId,
+        learnerName: cleanName,
+        learnerCode: digitalId,
+        ...(resolvedLevelId ? { levelId: resolvedLevelId, levelName: resolvedLevelName } : {}),
+        ...(resolvedClassId ? { classId: resolvedClassId, className: resolvedClassName } : {}),
+        joinedAt: existingLearner.createdAt || nowIso,
+        status: 'active',
+      });
+    }
+
+    await logAuditEvent({
+      actorId: params.teacherId,
+      actorName: params.teacherName,
+      actorRole: params.teacherRole || 'teacher',
+      action: 'UPDATE_LEARNER',
+      targetEntity: 'learner',
+      targetId: params.learnerId,
+      details: `Updated details for ${cleanName} (${existingLearner.digitalId || existingLearner.learnerId || params.learnerId}) — School: ${normalizedSchool}${normalizedGrade ? `, Grade: ${normalizedGrade}` : ''}.`,
+    });
+
+    const mergedLearner: Record<string, any> = {
+      ...existingLearner,
+      ...updatePayload,
+      id: params.learnerId,
+    };
+    const { passwordHash: _ph, salt: _s, ...publicLearner } = mergedLearner;
+    return publicLearner as unknown as Learner;
+  } catch (error: any) {
+    if (error?.message?.includes('not found') || error?.message?.includes('required')) {
+      throw error;
+    }
+    handleFirestoreError(error, OperationType.UPDATE, `learners/${params.learnerId}`);
+    throw error;
+  }
+}
+
+export async function deleteLearnerDirect(params: {
+  learnerId: string;
+  teacherId: string;
+  teacherName: string;
+  teacherRole?: string;
+}): Promise<void> {
+  if (!auth.currentUser) {
+    throw new Error('Staff authentication required. Please sign in again.');
+  }
+
+  try {
+    const learnerRef = doc(db, 'learners', params.learnerId);
+    const snap = await getDoc(learnerRef);
+    if (!snap.exists()) {
+      throw new Error('Learner account not found');
+    }
+    const existingLearner = snap.data() as Record<string, any>;
+
+    const [memberSnap, regSnap, fbSnap, certSnap] = await Promise.all([
+      getDocs(query(collection(db, 'cohortMembers'), where('learnerId', '==', params.learnerId))).catch(() => null),
+      getDocs(query(collection(db, 'dailyRegisters'), where('learnerDocId', '==', params.learnerId))).catch(() => null),
+      getDocs(query(collection(db, 'teacherFeedback'), where('learnerDocId', '==', params.learnerId))).catch(() => null),
+      getDocs(query(collection(db, 'masteryCertifications'), where('learnerId', '==', params.learnerId))).catch(() => null),
+    ]);
+
+    const cleanupOps: Promise<void>[] = [];
+    memberSnap?.docs.forEach((d) => cleanupOps.push(deleteDoc(d.ref).catch(() => {})));
+    regSnap?.docs.forEach((d) => cleanupOps.push(deleteDoc(d.ref).catch(() => {})));
+    fbSnap?.docs.forEach((d) => cleanupOps.push(deleteDoc(d.ref).catch(() => {})));
+    certSnap?.docs.forEach((d) => cleanupOps.push(deleteDoc(d.ref).catch(() => {})));
+    await Promise.all(cleanupOps);
+
+    await deleteDoc(learnerRef);
+
+    await logAuditEvent({
+      actorId: params.teacherId,
+      actorName: params.teacherName,
+      actorRole: params.teacherRole || 'teacher',
+      action: 'DELETE_LEARNER',
+      targetEntity: 'learner',
+      targetId: params.learnerId,
+      details: `Deleted learner ${existingLearner.fullName || params.learnerId} (${existingLearner.digitalId || existingLearner.learnerId || 'No ID'}, School: ${existingLearner.schoolName || 'Sangurur Comprehensive School'}).`,
+    });
+  } catch (error: any) {
+    if (error?.message?.includes('not found')) {
+      throw error;
+    }
+    handleFirestoreError(error, OperationType.DELETE, `learners/${params.learnerId}`);
     throw error;
   }
 }

@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useAuth } from '../../context/AuthContext';
-import { Lock, ShieldAlert, KeyRound, ArrowRight, AlertCircle, CheckCircle2 } from 'lucide-react';
+import { Lock, ShieldAlert, KeyRound, ArrowRight, AlertCircle, CheckCircle2, Eye, EyeOff } from 'lucide-react';
 
 interface FirstLoginModalProps {
   onSuccess: () => void;
@@ -10,6 +10,7 @@ export const FirstLoginModal: React.FC<FirstLoginModalProps> = ({ onSuccess }) =
   const { learnerProfile, changeLearnerPassword } = useAuth();
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
+  const [showPasswords, setShowPasswords] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
@@ -17,24 +18,27 @@ export const FirstLoginModal: React.FC<FirstLoginModalProps> = ({ onSuccess }) =
     e.preventDefault();
     setError(null);
 
-    if (newPassword === '123456789') {
+    const cleanNew = newPassword.trim();
+    const cleanConfirm = confirmPassword.trim();
+
+    if (cleanNew === '123456789') {
       setError('You cannot use the default initial password (123456789). Please choose a private password.');
       return;
     }
 
-    if (newPassword.length < 6) {
+    if (cleanNew.length < 6) {
       setError('Your new password must be at least 6 characters long.');
       return;
     }
 
-    if (newPassword !== confirmPassword) {
+    if (cleanNew !== cleanConfirm) {
       setError('Passwords do not match. Please retype carefully.');
       return;
     }
 
     setSaving(true);
     try {
-      await changeLearnerPassword(newPassword);
+      await changeLearnerPassword(cleanNew);
       onSuccess();
     } catch (err: any) {
       setError(err.message || 'Failed to update password');
@@ -90,14 +94,26 @@ export const FirstLoginModal: React.FC<FirstLoginModalProps> = ({ onSuccess }) =
                 <Lock className="w-4 h-4 text-slate-400" />
               </div>
               <input
-                type="password"
+                type={showPasswords ? 'text' : 'password'}
                 required
                 autoFocus
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
+                autoComplete="new-password"
                 placeholder="At least 6 characters"
                 value={newPassword}
                 onChange={(e) => setNewPassword(e.target.value)}
-                className="w-full pl-9 pr-3 py-2.5 bg-white border border-slate-300 rounded-xl text-sm focus:ring-2 focus:ring-emerald-600 outline-none"
+                className="w-full pl-9 pr-10 py-2.5 bg-white border border-slate-300 rounded-xl text-sm focus:ring-2 focus:ring-emerald-600 outline-none"
               />
+              <button
+                type="button"
+                onClick={() => setShowPasswords((prev) => !prev)}
+                aria-label={showPasswords ? 'Hide password' : 'Show password'}
+                className="absolute inset-y-0 right-0 pr-3 flex items-center text-slate-400 hover:text-slate-600"
+              >
+                {showPasswords ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+              </button>
             </div>
           </div>
 
@@ -110,12 +126,16 @@ export const FirstLoginModal: React.FC<FirstLoginModalProps> = ({ onSuccess }) =
                 <Lock className="w-4 h-4 text-slate-400" />
               </div>
               <input
-                type="password"
+                type={showPasswords ? 'text' : 'password'}
                 required
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
+                autoComplete="new-password"
                 placeholder="Retype your new password"
                 value={confirmPassword}
                 onChange={(e) => setConfirmPassword(e.target.value)}
-                className="w-full pl-9 pr-3 py-2.5 bg-white border border-slate-300 rounded-xl text-sm focus:ring-2 focus:ring-emerald-600 outline-none"
+                className="w-full pl-9 pr-10 py-2.5 bg-white border border-slate-300 rounded-xl text-sm focus:ring-2 focus:ring-emerald-600 outline-none"
               />
             </div>
           </div>

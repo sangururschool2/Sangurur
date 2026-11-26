@@ -121,8 +121,16 @@ service cloud.firestore {
              data.fullName is string && data.fullName.size() > 0 && data.fullName.size() <= 128 &&
              data.learnerId is string && data.learnerId.size() > 0 && data.learnerId.size() <= 64 &&
              data.username is string && data.username.size() > 0 && data.username.size() <= 64 &&
+             (!data.keys().hasAny(['digitalId']) || data.digitalId == null || (data.digitalId is string && data.digitalId.size() <= 64)) &&
              (!data.keys().hasAny(['schoolName']) || data.schoolName == null || (data.schoolName is string && data.schoolName.size() <= 128)) &&
              (!data.keys().hasAny(['grade']) || data.grade == null || (data.grade is string && data.grade.size() <= 64)) &&
+             (!data.keys().hasAny(['gender']) || data.gender == null || data.gender in ['male', 'female', 'other', 'prefer_not_to_say']) &&
+             (!data.keys().hasAny(['age']) || data.age == null || (data.age is number && data.age >= 3 && data.age <= 25)) &&
+             (!data.keys().hasAny(['guardianContact']) || data.guardianContact == null || (data.guardianContact is string && data.guardianContact.size() <= 64)) &&
+             (!data.keys().hasAny(['status']) || data.status in ['ACTIVE', 'INACTIVE', 'ARCHIVED']) &&
+             (!data.keys().hasAny(['active']) || data.active is bool) &&
+             (!data.keys().hasAny(['assignedCohortIds']) || (data.assignedCohortIds is list && data.assignedCohortIds.size() <= 20)) &&
+             (!data.keys().hasAny(['assignedClassIds']) || (data.assignedClassIds is list && data.assignedClassIds.size() <= 20)) &&
              (!data.keys().hasAny(['levelId']) || data.levelId == null || (data.levelId is string && data.levelId.size() <= 128)) &&
              (!data.keys().hasAny(['levelName']) || data.levelName == null || (data.levelName is string && data.levelName.size() <= 128)) &&
              (!data.keys().hasAny(['classId']) || data.classId == null || (data.classId is string && data.classId.size() <= 128)) &&
@@ -136,9 +144,16 @@ service cloud.firestore {
       allow update: if isValidId(learnerId) &&
                        isSignedIn() &&
                        isValidLearner(incoming()) &&
+                       incoming().learnerId == existing().learnerId &&
+                       incoming().username == existing().username &&
                        (
                          isAdmin() ||
                          (isTeacherOrAdmin() && incoming().diff(existing()).affectedKeys().hasOnly([
+                           'fullName',
+                           'schoolName',
+                           'gender',
+                           'age',
+                           'guardianContact',
                            'assignedCohortIds',
                            'assignedClassIds',
                            'levelId',
@@ -153,10 +168,11 @@ service cloud.firestore {
                            'status',
                            'active',
                            'sessionRevokedAt',
+                           'passwordResetAt',
                            'updatedAt'
                          ]))
                        );
-      allow delete: if isValidId(learnerId) && isAdmin();
+      allow delete: if isValidId(learnerId) && isSignedIn() && isStaffWideAccess();
     }
 
     // Atomic Sequence Counters: Server-side Admin SDK only
@@ -307,6 +323,24 @@ service cloud.firestore {
              );
     }
 
+    function isValidTeacherRegisterUpdate() {
+      return incoming().cohortId == existing().cohortId &&
+             incoming().learnerDocId == existing().learnerDocId &&
+             incoming().date == existing().date &&
+             incoming().status in ['present', 'late', 'absent', 'excused'] &&
+             (!incoming().keys().hasAny(['verificationStatus']) || incoming().verificationStatus in ['pending_verification', 'verified', 'corrected']) &&
+             (!incoming().keys().hasAny(['teacherNote']) || incoming().teacherNote == null || (incoming().teacherNote is string && incoming().teacherNote.size() <= 1024)) &&
+             (!incoming().keys().hasAny(['reviewedBy']) || incoming().reviewedBy == null || (incoming().reviewedBy is string && incoming().reviewedBy.size() <= 128)) &&
+             (!incoming().keys().hasAny(['reviewedAt']) || incoming().reviewedAt == null || (incoming().reviewedAt is string && incoming().reviewedAt.size() <= 64)) &&
+             (!incoming().keys().hasAny(['correctionHistory']) || incoming().correctionHistory == null || (incoming().correctionHistory is list && incoming().correctionHistory.size() <= 50)) &&
+             incoming().diff(existing()).affectedKeys().hasOnly([
+               'verificationStatus', 'reviewedBy', 'reviewedAt',
+               'status', 'teacherNote', 'correctionHistory',
+               'cohortCode', 'learnerId', 'learnerName',
+               'topicTitle', 'understandingLevel'
+             ]);
+    }
+
     match /dailyRegisters/{registerId} {
       allow get, list: if isSignedIn() && (
         isStaffWideAccess() ||
@@ -333,13 +367,13 @@ service cloud.firestore {
                        );
       allow update: if isValidId(registerId) &&
                        isSignedIn() &&
-                       isValidDailyRegister(incoming()) &&
                        incoming().cohortId == existing().cohortId &&
                        incoming().learnerDocId == existing().learnerDocId &&
                        incoming().date == existing().date &&
                        (
-                         ownsCohort(existing().cohortId) ||
+                         (ownsCohort(existing().cohortId) && isValidTeacherRegisterUpdate()) ||
                          (
+                           isValidDailyRegister(incoming()) &&
                            registerId == ('reg_' + existing().cohortId + '_' + request.auth.uid + '_' + existing().date) &&
                            existing().learnerDocId == request.auth.uid &&
                            !(existing().status in ['absent', 'excused']) &&
@@ -357,7 +391,7 @@ service cloud.firestore {
                            isLearnerEligibleForCohort(existing().cohortId)
                          )
                        );
-      allow delete: if isValidId(registerId) && isAdmin();
+      allow delete: if isValidId(registerId) && isSignedIn() && (isStaffWideAccess() || ownsCohort(existing().cohortId));
     }
 
     // Teacher Feedback Collection: Author teacher / learner recipient / admin only
@@ -383,7 +417,7 @@ service cloud.firestore {
                        isSignedIn() &&
                        isValidTeacherFeedback(incoming()) &&
                        (isAdmin() || (isTeacherOrAdmin() && existing().teacherId == request.auth.uid));
-      allow delete: if isValidId(feedbackId) && isAdmin();
+      allow delete: if isValidId(feedbackId) && isSignedIn() && (isStaffWideAccess() || (isTeacherOrAdmin() && existing().teacherId == request.auth.uid));
     }
 
     // Mastery Certifications Collection: Cohort-owned teacher writes + learner self-read
@@ -404,7 +438,7 @@ service cloud.firestore {
                                isSignedIn() &&
                                isValidMasteryCert(incoming()) &&
                                ownsCohort(incoming().cohortId);
-      allow delete: if isValidId(certId) && isAdmin();
+      allow delete: if isValidId(certId) && isSignedIn() && (isStaffWideAccess() || ownsCohort(existing().cohortId));
     }
 
     // Audit Logs Collection: Append-only for staff/admins, strictly immutable

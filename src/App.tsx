@@ -40,7 +40,7 @@ import {
 import { School, Loader2 } from 'lucide-react';
 
 const MainApplication: React.FC = () => {
-  const { role, teacherProfile, learnerProfile, loading } = useAuth();
+  const { role, teacherProfile, teacherToken, learnerProfile, loading } = useAuth();
 
   // Active teacher tab & mobile drawer
   const [currentTab, setCurrentTab] = useState<TeacherTab>('dashboard');
@@ -56,9 +56,10 @@ const MainApplication: React.FC = () => {
   const [teachers, setTeachers] = useState<Teacher[]>([]);
   const [dataLoading, setDataLoading] = useState<boolean>(false);
 
-  // Curriculum to customize in builder & optional initial grade filter from dashboard
+  // Curriculum to customize in builder & optional initial grade/school filters from dashboard
   const [builderCurriculum, setBuilderCurriculum] = useState<Curriculum | null>(null);
   const [learnerGradeFilter, setLearnerGradeFilter] = useState<string>('all');
+  const [learnerSchoolFilter, setLearnerSchoolFilter] = useState<string>('all');
 
   // Learner first-time login modal state
   const [showFirstLoginModal, setShowFirstLoginModal] = useState<boolean>(false);
@@ -191,12 +192,19 @@ const MainApplication: React.FC = () => {
 
   const handleVerifyRegister = async (regId: string) => {
     if (!teacherProfile) return;
-    await verifyDailyRegister(regId, teacherProfile.uid);
+    await verifyDailyRegister(regId, teacherProfile.uid, teacherToken);
     await loadSystemData();
   };
 
   const handleSelectGradeFilterFromDashboard = (levelFilter: string) => {
+    setLearnerSchoolFilter('all');
     setLearnerGradeFilter(levelFilter);
+    setCurrentTab('learners');
+  };
+
+  const handleSelectSchoolFilterFromDashboard = (schoolFilter: string) => {
+    setLearnerGradeFilter('all');
+    setLearnerSchoolFilter(schoolFilter);
     setCurrentTab('learners');
   };
 
@@ -241,6 +249,7 @@ const MainApplication: React.FC = () => {
                   onNavigate={(tab) => setCurrentTab(tab)}
                   onVerifyRegister={handleVerifyRegister}
                   onSelectGradeFilter={handleSelectGradeFilterFromDashboard}
+                  onSelectSchoolFilter={handleSelectSchoolFilterFromDashboard}
                 />
               )}
 
@@ -272,6 +281,7 @@ const MainApplication: React.FC = () => {
                   cohortClasses={cohortClasses}
                   onRefresh={loadSystemData}
                   initialGradeFilter={learnerGradeFilter}
+                  initialSchoolFilter={learnerSchoolFilter}
                 />
               )}
 

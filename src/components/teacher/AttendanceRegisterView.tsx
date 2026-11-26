@@ -17,7 +17,7 @@ import { generateDailyAttendancePDF } from '../../services/pdfReportGenerator';
 import { SchoolLogo } from '../common/SchoolLogo';
 import { useAuth } from '../../context/AuthContext';
 import { auth } from '../../services/firebase';
-import { getTeacherAuthHeaders } from '../../utils/authHeaders';
+import { teacherFetch } from '../../utils/authHeaders';
 import {
   ClipboardCheck,
   Calendar,
@@ -120,7 +120,7 @@ export const AttendanceRegisterView: React.FC<AttendanceRegisterViewProps> = ({
   const handleVerify = async (r: DailyRegister) => {
     setActionError(null);
     try {
-      await verifyDailyRegister(r.id, currentTeacherId);
+      await verifyDailyRegister(r.id, currentTeacherId, teacherToken);
       await onRefresh();
     } catch (err: any) {
       setActionError(err.message || 'Error verifying register');
@@ -152,7 +152,8 @@ export const AttendanceRegisterView: React.FC<AttendanceRegisterViewProps> = ({
         newStatus,
         correctionReason.trim(),
         currentTeacherId,
-        currentTeacherName
+        currentTeacherName,
+        teacherToken
       );
       await onRefresh();
       setCorrectingRegister(null);
@@ -177,18 +178,21 @@ export const AttendanceRegisterView: React.FC<AttendanceRegisterViewProps> = ({
     setManualError(null);
     setSubmittingManual(true);
     try {
-      await logTeacherAttendanceEntry({
-        cohortId: cohort.id,
-        cohortCode: cohort.code,
-        learnerDocId: learner.id,
-        learnerId: learner.learnerId,
-        learnerName: learner.fullName,
-        date: selectedDate || nairobiToday,
-        status: manualStatus,
-        teacherId: currentTeacherId,
-        teacherName: currentTeacherName,
-        reason: manualReason || `Teacher marked ${manualStatus}`,
-      });
+      await logTeacherAttendanceEntry(
+        {
+          cohortId: cohort.id,
+          cohortCode: cohort.code,
+          learnerDocId: learner.id,
+          learnerId: learner.learnerId,
+          learnerName: learner.fullName,
+          date: selectedDate || nairobiToday,
+          status: manualStatus,
+          teacherId: currentTeacherId,
+          teacherName: currentTeacherName,
+          reason: manualReason || `Teacher marked ${manualStatus}`,
+        },
+        teacherToken
+      );
       await onRefresh();
       setShowManualModal(false);
       setManualReason('');
@@ -333,10 +337,9 @@ export const AttendanceRegisterView: React.FC<AttendanceRegisterViewProps> = ({
           teacherName: currentTeacherName,
         });
       } else {
-        const headers = await getTeacherAuthHeaders(teacherToken);
-        const res = await fetch('/api/attendance/bulk-upload', {
+        const res = await teacherFetch('/api/attendance/bulk-upload', teacherToken, {
           method: 'POST',
-          headers,
+          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             cohortId: uploadCohortId || undefined,
             entries: validRows,
@@ -347,11 +350,29 @@ export const AttendanceRegisterView: React.FC<AttendanceRegisterViewProps> = ({
           }),
         });
 
-        const json = await res.json();
+        const json = await res.json().catch(() => ({}));
         if (!res.ok) {
-          throw new Error(json.error || 'Failed to upload historical attendance register');
+          if (
+            (res.status === 503 ||
+              json?.code === 'MISSING_ADMIN_SDK' ||
+              json?.code === 'MISSING_SERVICE_ACCOUNT_JSON' ||
+              json?.code === 'FIREBASE_ADMIN_AUTH_FAILED') &&
+            auth.currentUser
+          ) {
+            data = await bulkUploadHistoricalAttendanceDirect({
+              cohortId: uploadCohortId || undefined,
+              entries: validRows,
+              conflictMode: uploadConflictMode,
+              sessionLabel: uploadSessionLabel.trim() || undefined,
+              teacherId: currentTeacherId,
+              teacherName: currentTeacherName,
+            });
+          } else {
+            throw new Error(json.error || 'Failed to upload historical attendance register');
+          }
+        } else {
+          data = json;
         }
-        data = json;
       }
 
       setUploadResult({

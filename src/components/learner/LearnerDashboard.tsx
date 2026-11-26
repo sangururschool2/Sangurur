@@ -1,5 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../../context/AuthContext';
+import { auth } from '../../services/firebase';
+import { learnerFetch } from '../../utils/authHeaders';
 import {
   Cohort,
   CohortLevel,
@@ -38,6 +40,8 @@ import {
   Edit3,
   PanelLeftClose,
   PanelLeftOpen,
+  Eye,
+  EyeOff,
 } from 'lucide-react';
 
 interface LearnerDashboardProps {
@@ -68,6 +72,7 @@ export const LearnerDashboard: React.FC<LearnerDashboardProps> = ({
   const [currentPwd, setCurrentPwd] = useState('');
   const [newPwd, setNewPwd] = useState('');
   const [confirmPwd, setConfirmPwd] = useState('');
+  const [showPwdFields, setShowPwdFields] = useState(false);
   const [pwdError, setPwdError] = useState<string | null>(null);
   const [pwdSuccess, setPwdSuccess] = useState<string | null>(null);
   const [savingPwd, setSavingPwd] = useState(false);
@@ -153,13 +158,11 @@ export const LearnerDashboard: React.FC<LearnerDashboardProps> = ({
   // Load strictly assigned cohorts, levels, and classes via authenticated backend API
   useEffect(() => {
     async function initLearnerCohorts() {
-      if (!learnerProfile || !learnerToken) return;
+      if (!learnerProfile || (!learnerToken && !auth.currentUser)) return;
       setLoading(true);
       setCohortLoadError(null);
       try {
-        const res = await fetch('/api/learner/cohorts', {
-          headers: { Authorization: `Bearer ${learnerToken}` },
-        });
+        const res = await learnerFetch('/api/learner/cohorts', learnerToken);
         const data = await res.json();
         if (!res.ok) {
           throw new Error(data.error || 'Could not load assigned cohorts');
@@ -198,20 +201,14 @@ export const LearnerDashboard: React.FC<LearnerDashboardProps> = ({
   // Load scoped registers, feedback, and class timetable once cohort/class is selected
   useEffect(() => {
     async function loadData() {
-      if (!learnerProfile || !learnerToken || !activeCohort) return;
+      if (!learnerProfile || (!learnerToken && !auth.currentUser) || !activeCohort) return;
       setLoading(true);
       const classQuery = activeClass?.id ? `&classId=${encodeURIComponent(activeClass.id)}` : '';
       try {
         const [regRes, fbRes, ttRes] = await Promise.all([
-          fetch(`/api/learner/registers?cohortId=${encodeURIComponent(activeCohort.id)}`, {
-            headers: { Authorization: `Bearer ${learnerToken}` },
-          }),
-          fetch('/api/learner/feedback', {
-            headers: { Authorization: `Bearer ${learnerToken}` },
-          }),
-          fetch(`/api/learner/timetable?cohortId=${encodeURIComponent(activeCohort.id)}${classQuery}`, {
-            headers: { Authorization: `Bearer ${learnerToken}` },
-          }),
+          learnerFetch(`/api/learner/registers?cohortId=${encodeURIComponent(activeCohort.id)}`, learnerToken),
+          learnerFetch('/api/learner/feedback', learnerToken),
+          learnerFetch(`/api/learner/timetable?cohortId=${encodeURIComponent(activeCohort.id)}${classQuery}`, learnerToken),
         ]);
         const regJson = await regRes.json();
         const fbJson = await fbRes.json();
@@ -233,22 +230,25 @@ export const LearnerDashboard: React.FC<LearnerDashboardProps> = ({
     setPwdError(null);
     setPwdSuccess(null);
 
-    if (newPwd === '123456789') {
+    const cleanNewPwd = newPwd.trim();
+    const cleanConfirmPwd = confirmPwd.trim();
+
+    if (cleanNewPwd === '123456789') {
       setPwdError('New password cannot be the default initial password (123456789).');
       return;
     }
-    if (newPwd.length < 6) {
+    if (cleanNewPwd.length < 6) {
       setPwdError('New password must be at least 6 characters.');
       return;
     }
-    if (newPwd !== confirmPwd) {
+    if (cleanNewPwd !== cleanConfirmPwd) {
       setPwdError('New passwords do not match.');
       return;
     }
 
     setSavingPwd(true);
     try {
-      await changeLearnerPassword(newPwd, currentPwd);
+      await changeLearnerPassword(cleanNewPwd, currentPwd);
       setPwdSuccess('Password updated successfully.');
       setCurrentPwd('');
       setNewPwd('');
@@ -1150,12 +1150,24 @@ export const LearnerDashboard: React.FC<LearnerDashboardProps> = ({
                 <div className="relative">
                   <Lock className="w-4 h-4 text-slate-400 absolute left-3 top-2.5 pointer-events-none" />
                   <input
-                    type="password"
+                    type={showPwdFields ? 'text' : 'password'}
                     required
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    spellCheck={false}
+                    autoComplete="current-password"
                     value={currentPwd}
                     onChange={(e) => setCurrentPwd(e.target.value)}
-                    className="w-full pl-9 pr-3 py-2 border border-slate-300 rounded-xl text-sm outline-none focus:ring-2 focus:ring-emerald-600"
+                    className="w-full pl-9 pr-10 py-2 border border-slate-300 rounded-xl text-sm outline-none focus:ring-2 focus:ring-emerald-600"
                   />
+                  <button
+                    type="button"
+                    onClick={() => setShowPwdFields((prev) => !prev)}
+                    aria-label={showPwdFields ? 'Hide passwords' : 'Show passwords'}
+                    className="absolute inset-y-0 right-0 pr-3 flex items-center text-slate-400 hover:text-slate-600"
+                  >
+                    {showPwdFields ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
                 </div>
               </div>
 
@@ -1166,12 +1178,16 @@ export const LearnerDashboard: React.FC<LearnerDashboardProps> = ({
                 <div className="relative">
                   <Lock className="w-4 h-4 text-slate-400 absolute left-3 top-2.5 pointer-events-none" />
                   <input
-                    type="password"
+                    type={showPwdFields ? 'text' : 'password'}
                     required
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    spellCheck={false}
+                    autoComplete="new-password"
                     placeholder="At least 6 characters"
                     value={newPwd}
                     onChange={(e) => setNewPwd(e.target.value)}
-                    className="w-full pl-9 pr-3 py-2 border border-slate-300 rounded-xl text-sm outline-none focus:ring-2 focus:ring-emerald-600"
+                    className="w-full pl-9 pr-10 py-2 border border-slate-300 rounded-xl text-sm outline-none focus:ring-2 focus:ring-emerald-600"
                   />
                 </div>
               </div>
@@ -1183,11 +1199,15 @@ export const LearnerDashboard: React.FC<LearnerDashboardProps> = ({
                 <div className="relative">
                   <Lock className="w-4 h-4 text-slate-400 absolute left-3 top-2.5 pointer-events-none" />
                   <input
-                    type="password"
+                    type={showPwdFields ? 'text' : 'password'}
                     required
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    spellCheck={false}
+                    autoComplete="new-password"
                     value={confirmPwd}
                     onChange={(e) => setConfirmPwd(e.target.value)}
-                    className="w-full pl-9 pr-3 py-2 border border-slate-300 rounded-xl text-sm outline-none focus:ring-2 focus:ring-emerald-600"
+                    className="w-full pl-9 pr-10 py-2 border border-slate-300 rounded-xl text-sm outline-none focus:ring-2 focus:ring-emerald-600"
                   />
                 </div>
               </div>

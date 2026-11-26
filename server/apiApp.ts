@@ -106,17 +106,13 @@ const IS_PRODUCTION = process.env.NODE_ENV === 'production' || process.env.NETLI
 const ENV_SESSION_SECRET = process.env.SESSION_SECRET?.trim() || '';
 const SESSION_SECRET_CONFIGURED = ENV_SESSION_SECRET.length >= 16;
 
-const SESSION_SECRET = (() => {
-  if (SESSION_SECRET_CONFIGURED) {
-    return ENV_SESSION_SECRET;
-  }
+const EPHEMERAL_FALLBACK_SECRET = (() => {
   if (IS_PRODUCTION) {
     console.warn(
-      'SDLR Security Alert: SESSION_SECRET env var is missing or under 16 characters in production. Configure SESSION_SECRET in Netlify Environment variables.'
+      'SDLR Security Alert: SESSION_SECRET env var is missing or under 16 characters in production. Using Firestore-persisted fallback secret when available; configure SESSION_SECRET in Netlify Environment variables.'
     );
     return crypto.randomBytes(32).toString('hex');
   }
-  // Local non-production fallback: persist a random secret in OS temp dir (never derived from public Firebase config)
   const devSecretFile = path.join(os.tmpdir(), '.sdlr_dev_session_secret');
   try {
     if (fs.existsSync(devSecretFile)) {
@@ -131,8 +127,72 @@ const SESSION_SECRET = (() => {
   }
 })();
 
+let cachedFirestoreSessionSecret: string | null = null;
+let sessionSecretInitPromise: Promise<string> | null = null;
+
+async function getSessionSecret(db: ServerDbAdapter | null): Promise<string> {
+  if (SESSION_SECRET_CONFIGURED) {
+    return ENV_SESSION_SECRET;
+  }
+  if (cachedFirestoreSessionSecret) {
+    return cachedFirestoreSessionSecret;
+  }
+  if (!db || db.mode !== 'admin') {
+    return EPHEMERAL_FALLBACK_SECRET;
+  }
+  if (sessionSecretInitPromise) {
+    return sessionSecretInitPromise;
+  }
+
+  sessionSecretInitPromise = (async () => {
+    try {
+      // Fast read-first path avoids Firestore transaction write contention under concurrent classroom logins
+      const existingSnap = await db.getDoc('counters', '_sdlr_session_secret');
+      const preExisting = String(existingSnap.data()?.secret || '').trim();
+      if (existingSnap.exists && preExisting.length >= 32) {
+        cachedFirestoreSessionSecret = preExisting;
+        return preExisting;
+      }
+
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          const secret = await db.runTransaction(async (tx) => {
+            const snap = await tx.get('counters', '_sdlr_session_secret');
+            const existing = String(snap.data()?.secret || '').trim();
+            if (snap.exists && existing.length >= 32) {
+              return existing;
+            }
+            const generated = crypto.randomBytes(32).toString('hex');
+            tx.set('counters', '_sdlr_session_secret', {
+              secret: generated,
+              updatedAt: new Date().toISOString(),
+            });
+            return generated;
+          });
+          cachedFirestoreSessionSecret = secret;
+          return secret;
+        } catch (txErr) {
+          if (attempt === 2) throw txErr;
+          await new Promise((resolve) => setTimeout(resolve, 60 * (attempt + 1)));
+        }
+      }
+      return EPHEMERAL_FALLBACK_SECRET;
+    } catch (err) {
+      console.warn('Could not load/persist shared session secret in Firestore:', err);
+      return EPHEMERAL_FALLBACK_SECRET;
+    } finally {
+      sessionSecretInitPromise = null;
+    }
+  })();
+
+  return sessionSecretInitPromise;
+}
+
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000; // 12 hours
-const BOOTSTRAP_ADMIN_EMAIL = 'sangururschool10@gmail.com';
+const BOOTSTRAP_ADMIN_EMAILS = new Set([
+  'sangururschool10@gmail.com',
+  'sangururschool2@gmail.com',
+]);
 const DEFAULT_INITIAL_PASSWORD = '123456789';
 const DEFAULT_TEACHER_UID = 'teacher_default_staff';
 const DEFAULT_TEACHER_USERNAME = 'Teacher';
@@ -141,6 +201,7 @@ interface SessionPayload {
   sub: string;
   role: 'learner';
   digitalId: string;
+  jti?: string;
   iat: number;
   exp: number;
 }
@@ -149,12 +210,14 @@ interface TeacherSessionPayload {
   sub: string;
   role: 'teacher' | 'admin' | 'super_admin';
   username: string;
+  jti?: string;
   iat: number;
   exp: number;
 }
 
 interface AuthenticatedLearnerRequest extends Request {
   authLearner?: any;
+  reissuedLearnerSession?: { token: string; expiresAt: number };
 }
 
 interface AuthenticatedTeacherRequest extends Request {
@@ -178,6 +241,7 @@ interface ServerDbAdapter {
   getDoc: (colName: string, docId: string) => Promise<DocSnapshotLike>;
   setDoc: (colName: string, docId: string, data: Record<string, any>) => Promise<void>;
   updateDoc: (colName: string, docId: string, data: Record<string, any>) => Promise<void>;
+  deleteDoc: (colName: string, docId: string) => Promise<void>;
   getCollectionDocs: (colName: string) => Promise<Array<{ id: string; data: () => Record<string, any> }>>;
   queryWhere: (
     colName: string,
@@ -441,6 +505,9 @@ function getServerDbAdapter(): {
     async updateDoc(colName, docId, data) {
       await adminDb.collection(colName).doc(docId).update(stripUndefinedDeep(data));
     },
+    async deleteDoc(colName, docId) {
+      await adminDb.collection(colName).doc(docId).delete();
+    },
     async getCollectionDocs(colName) {
       const snap = await adminDb.collection(colName).get();
       return snap.docs.map((d) => ({ id: d.id, data: () => d.data() }));
@@ -530,27 +597,33 @@ function formatServerFirestoreError(
   };
 }
 
-function createSessionToken(learnerDocId: string, digitalId: string): { token: string; expiresAt: number } {
-  const now = Date.now();
+function createSessionToken(
+  learnerDocId: string,
+  digitalId: string,
+  secret: string,
+  issuedAtMs?: number
+): { token: string; expiresAt: number } {
+  const now = issuedAtMs ?? Date.now();
   const expiresAt = now + SESSION_TTL_MS;
   const payload: SessionPayload = {
     sub: learnerDocId,
     role: 'learner',
     digitalId,
+    jti: crypto.randomBytes(12).toString('hex'),
     iat: now,
     exp: expiresAt,
   };
   const encoded = Buffer.from(JSON.stringify(payload), 'utf-8').toString('base64url');
-  const sig = crypto.createHmac('sha256', SESSION_SECRET).update(encoded).digest('base64url');
+  const sig = crypto.createHmac('sha256', secret).update(encoded).digest('base64url');
   return { token: `${encoded}.${sig}`, expiresAt };
 }
 
-function verifySessionToken(token: string): SessionPayload | null {
+function verifySessionToken(token: string, secret: string): SessionPayload | null {
   try {
     const parts = token.split('.');
     if (parts.length !== 2) return null;
     const [encoded, sig] = parts;
-    const expectedSig = crypto.createHmac('sha256', SESSION_SECRET).update(encoded).digest('base64url');
+    const expectedSig = crypto.createHmac('sha256', secret).update(encoded).digest('base64url');
     const sigBuf = Buffer.from(sig);
     const expectedBuf = Buffer.from(expectedSig);
     if (sigBuf.length !== expectedBuf.length || !crypto.timingSafeEqual(sigBuf, expectedBuf)) {
@@ -569,7 +642,8 @@ function verifySessionToken(token: string): SessionPayload | null {
 function createTeacherSessionToken(
   teacherUid: string,
   username: string,
-  role: 'teacher' | 'admin' | 'super_admin'
+  role: 'teacher' | 'admin' | 'super_admin',
+  secret: string
 ): { token: string; expiresAt: number } {
   const now = Date.now();
   const expiresAt = now + SESSION_TTL_MS;
@@ -577,20 +651,21 @@ function createTeacherSessionToken(
     sub: teacherUid,
     role,
     username,
+    jti: crypto.randomBytes(12).toString('hex'),
     iat: now,
     exp: expiresAt,
   };
   const encoded = Buffer.from(JSON.stringify(payload), 'utf-8').toString('base64url');
-  const sig = crypto.createHmac('sha256', SESSION_SECRET).update(encoded).digest('base64url');
+  const sig = crypto.createHmac('sha256', secret).update(encoded).digest('base64url');
   return { token: `${encoded}.${sig}`, expiresAt };
 }
 
-function verifyTeacherSessionToken(token: string): TeacherSessionPayload | null {
+function verifyTeacherSessionToken(token: string, secret: string): TeacherSessionPayload | null {
   try {
     const parts = token.split('.');
     if (parts.length !== 2) return null;
     const [encoded, sig] = parts;
-    const expectedSig = crypto.createHmac('sha256', SESSION_SECRET).update(encoded).digest('base64url');
+    const expectedSig = crypto.createHmac('sha256', secret).update(encoded).digest('base64url');
     const sigBuf = Buffer.from(sig);
     const expectedBuf = Buffer.from(expectedSig);
     if (sigBuf.length !== expectedBuf.length || !crypto.timingSafeEqual(sigBuf, expectedBuf)) {
@@ -611,6 +686,29 @@ function verifyTeacherSessionToken(token: string): TeacherSessionPayload | null 
   }
 }
 
+async function isSessionTokenRevoked(db: ServerDbAdapter, jti?: string): Promise<boolean> {
+  if (!jti) return false;
+  try {
+    const snap = await db.getDoc('revokedSessions', jti);
+    return snap.exists;
+  } catch {
+    return false;
+  }
+}
+
+function normalizeDigitalIdKey(raw: string): string {
+  const unified = String(raw || '')
+    .trim()
+    .replace(/[\u2010-\u2015\u2212]/g, '-')
+    .replace(/\s+/g, '')
+    .toUpperCase();
+  const sglrnMatch = unified.match(/^SG-?LRN-?(\d{4})-?0*(\d+)$/);
+  if (sglrnMatch) {
+    return `SG-LRN-${sglrnMatch[1]}-${sglrnMatch[2].padStart(3, '0')}`;
+  }
+  return unified;
+}
+
 // Verify Firebase Auth ID tokens server-side (via Admin SDK if available, else Identity Toolkit)
 async function verifyFirebaseIdToken(
   idToken: string,
@@ -627,7 +725,8 @@ async function verifyFirebaseIdToken(
         displayName: decoded.name,
         authTime: typeof decoded.auth_time === 'number' ? decoded.auth_time * 1000 : undefined,
       };
-    } catch {
+    } catch (err: any) {
+      console.warn('[SDLR Auth] verifyIdToken failed:', err?.code || err?.message || 'unknown');
       return null;
     }
   }
@@ -671,6 +770,35 @@ function generateSalt(): string {
 
 function hashPassword(password: string, salt: string): string {
   return crypto.pbkdf2Sync(password, salt, 1000, 64, 'sha512').toString('hex');
+}
+
+function verifyLearnerPassword(rawPassword: string, learnerData: Record<string, any>): boolean {
+  const candidates: string[] = [rawPassword];
+  const trimmed = rawPassword.trim();
+  if (trimmed && trimmed !== rawPassword) {
+    candidates.push(trimmed);
+  }
+
+  const storedHash = String(learnerData.passwordHash || '').trim().toLowerCase();
+  const storedSalt = String(learnerData.salt || '').trim();
+
+  if (storedHash && storedSalt) {
+    const storedBuf = Buffer.from(storedHash, 'utf8');
+    for (const candidate of candidates) {
+      const computedHash = hashPassword(candidate, storedSalt).toLowerCase();
+      const computedBuf = Buffer.from(computedHash, 'utf8');
+      if (
+        computedBuf.length > 0 &&
+        computedBuf.length === storedBuf.length &&
+        crypto.timingSafeEqual(computedBuf, storedBuf)
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  return candidates.some((candidate) => candidate === DEFAULT_INITIAL_PASSWORD);
 }
 
 function getNairobiDateString(): string {
@@ -746,21 +874,18 @@ async function allocateDigitalIds(db: ServerDbAdapter | null, count: number): Pr
   }
 
   let bootstrapMax = 0;
-  const preSnap = await db.getDoc('counters', 'learner_digital_id_2026');
-  if (!preSnap.exists) {
-    const learnersDocs = await db.getCollectionDocs('learners');
-    learnersDocs.forEach((d) => {
-      const data = d.data();
-      const idStr = String(data.digitalId || data.learnerId || data.username || '');
-      const match = idStr.match(/^SG-LRN-2026-(\d+)$/i) || idStr.match(/(\d+)$/);
-      if (match) {
-        const num = parseInt(match[1], 10);
-        if (!isNaN(num) && num > bootstrapMax) {
-          bootstrapMax = num;
-        }
+  const learnersDocs = await db.getCollectionDocs('learners');
+  learnersDocs.forEach((d) => {
+    const data = d.data();
+    const idStr = String(data.digitalId || data.learnerId || data.username || '');
+    const match = idStr.match(/^SG-LRN-2026-(\d+)$/i) || idStr.match(/(\d+)$/);
+    if (match) {
+      const num = parseInt(match[1], 10);
+      if (!isNaN(num) && num > bootstrapMax) {
+        bootstrapMax = num;
       }
-    });
-  }
+    }
+  });
 
   const startSeq = await db.runTransaction(async (tx) => {
     const counterDoc = await tx.get('counters', 'learner_digital_id_2026');
@@ -906,7 +1031,8 @@ export function createApiApp(options?: { isServerless?: boolean }): Express {
         });
       }
 
-      const payload = verifySessionToken(token);
+      const sessionSecret = await getSessionSecret(db);
+      const payload = verifySessionToken(token, sessionSecret);
       let learnerDocId = payload?.sub || '';
       let isFirebaseToken = false;
       let fbAuthTime: number | undefined;
@@ -919,6 +1045,8 @@ export function createApiApp(options?: { isServerless?: boolean }): Express {
         learnerDocId = fbUser.uid;
         isFirebaseToken = true;
         fbAuthTime = fbUser.authTime;
+      } else if (await isSessionTokenRevoked(db, payload.jti)) {
+        return res.status(401).json({ error: 'Session has been logged out. Please sign in again.' });
       }
 
       const snap = await db.getDoc('learners', learnerDocId);
@@ -929,14 +1057,36 @@ export function createApiApp(options?: { isServerless?: boolean }): Express {
       if (data.status === 'INACTIVE' || data.active === false) {
         return res.status(403).json({ error: 'Learner account is inactive. Please contact your school administrator.' });
       }
-      if (!isFirebaseToken && payload && data.sessionRevokedAt && payload.iat < Number(data.sessionRevokedAt)) {
+      const nowMs = Date.now();
+      const revokedTs = Number(data.sessionRevokedAt);
+      if (
+        !isFirebaseToken &&
+        payload &&
+        Number.isFinite(revokedTs) &&
+        revokedTs > 0 &&
+        revokedTs <= nowMs + 60_000 &&
+        payload.iat < revokedTs
+      ) {
         return res.status(401).json({ error: 'Session has been logged out or reset. Please sign in again.' });
       }
-      if (isFirebaseToken && data.passwordResetAt && fbAuthTime && fbAuthTime < Number(data.passwordResetAt)) {
+      // Firebase auth_time is truncated to whole seconds; allow tokens minted in the same second as passwordResetAt
+      const resetTs = Number(data.passwordResetAt);
+      if (
+        isFirebaseToken &&
+        Number.isFinite(resetTs) &&
+        resetTs > 0 &&
+        resetTs <= nowMs + 60_000 &&
+        fbAuthTime &&
+        fbAuthTime + 1000 < resetTs
+      ) {
         return res.status(401).json({ error: 'Your password was recently reset. Please sign in again.' });
       }
 
       const digitalId = data.digitalId || data.learnerId || data.username || snap.id;
+      if (isFirebaseToken) {
+        req.reissuedLearnerSession = createSessionToken(snap.id, digitalId, sessionSecret);
+      }
+
       req.authLearner = {
         id: snap.id,
         digitalId,
@@ -979,8 +1129,12 @@ export function createApiApp(options?: { isServerless?: boolean }): Express {
         });
       }
 
-      const staffPayload = verifyTeacherSessionToken(token);
+      const sessionSecret = await getSessionSecret(db);
+      const staffPayload = verifyTeacherSessionToken(token, sessionSecret);
       if (staffPayload) {
+        if (await isSessionTokenRevoked(db, staffPayload.jti)) {
+          return res.status(401).json({ error: 'Teacher session has been signed out. Please sign in again.' });
+        }
         const teacherSnap = await db.getDoc('teachers', staffPayload.sub);
         if (!teacherSnap.exists) {
           return res.status(401).json({ error: 'Teacher account no longer exists.' });
@@ -989,7 +1143,14 @@ export function createApiApp(options?: { isServerless?: boolean }): Express {
         if (teacherData.active === false) {
           return res.status(403).json({ error: 'Teacher account is inactive.' });
         }
-        if (teacherData.sessionRevokedAt && staffPayload.iat < Number(teacherData.sessionRevokedAt)) {
+        const revokedTs = Number(teacherData.sessionRevokedAt);
+        if (
+          staffPayload.sub !== DEFAULT_TEACHER_UID &&
+          Number.isFinite(revokedTs) &&
+          revokedTs > 0 &&
+          revokedTs <= Date.now() + 60_000 &&
+          staffPayload.iat < revokedTs
+        ) {
           return res.status(401).json({ error: 'Teacher session has been signed out. Please sign in again.' });
         }
         req.authTeacher = {
@@ -1007,7 +1168,7 @@ export function createApiApp(options?: { isServerless?: boolean }): Express {
       }
 
       const teacherSnap = await db.getDoc('teachers', fbUser.uid);
-      const isBootstrapAdmin = fbUser.email === BOOTSTRAP_ADMIN_EMAIL;
+      const isBootstrapAdmin = BOOTSTRAP_ADMIN_EMAILS.has(fbUser.email.toLowerCase());
 
       if (!teacherSnap.exists && !isBootstrapAdmin) {
         return res.status(403).json({ error: 'Access denied: staff teacher profile not authorized.' });
@@ -1062,15 +1223,40 @@ export function createApiApp(options?: { isServerless?: boolean }): Express {
       if (!token || !db) {
         return res.json({ success: true });
       }
+      const sessionSecret = await getSessionSecret(db);
       const revokedAt = Date.now();
-      const teacherPayload = verifyTeacherSessionToken(token);
+      const teacherPayload = verifyTeacherSessionToken(token, sessionSecret);
       if (teacherPayload) {
-        await db.updateDoc('teachers', teacherPayload.sub, { sessionRevokedAt: revokedAt }).catch(() => {});
+        if (teacherPayload.jti) {
+          await db
+            .setDoc('revokedSessions', teacherPayload.jti, {
+              jti: teacherPayload.jti,
+              role: 'teacher',
+              sub: teacherPayload.sub,
+              revokedAt,
+              expiresAt: teacherPayload.exp,
+            })
+            .catch(() => {});
+        } else if (teacherPayload.sub !== DEFAULT_TEACHER_UID) {
+          await db.updateDoc('teachers', teacherPayload.sub, { sessionRevokedAt: revokedAt }).catch(() => {});
+        }
         return res.json({ success: true });
       }
-      const learnerPayload = verifySessionToken(token);
+      const learnerPayload = verifySessionToken(token, sessionSecret);
       if (learnerPayload) {
-        await db.updateDoc('learners', learnerPayload.sub, { sessionRevokedAt: revokedAt }).catch(() => {});
+        if (learnerPayload.jti) {
+          await db
+            .setDoc('revokedSessions', learnerPayload.jti, {
+              jti: learnerPayload.jti,
+              role: 'learner',
+              sub: learnerPayload.sub,
+              revokedAt,
+              expiresAt: learnerPayload.exp,
+            })
+            .catch(() => {});
+        } else {
+          await db.updateDoc('learners', learnerPayload.sub, { sessionRevokedAt: revokedAt }).catch(() => {});
+        }
         return res.json({ success: true });
       }
       return res.json({ success: true });
@@ -1083,12 +1269,6 @@ export function createApiApp(options?: { isServerless?: boolean }): Express {
   app.post('/api/auth/teacher-login', async (req: Request, res: Response) => {
     const { db, adminAuth, initState } = getServerDbAdapter();
     try {
-      if (IS_PRODUCTION && !SESSION_SECRET_CONFIGURED) {
-        return res.status(503).json({
-          error: 'Server SESSION_SECRET is not configured. Set a 32+ character SESSION_SECRET in Netlify Environment Variables.',
-          code: 'MISSING_SESSION_SECRET',
-        });
-      }
       const { username, password } = req.body || {};
       if (!username || !password) {
         return res.status(400).json({ error: 'Username and password are required.' });
@@ -1163,7 +1343,17 @@ export function createApiApp(options?: { isServerless?: boolean }): Express {
         updatedAt: teacherData?.updatedAt,
       };
 
-      const { token, expiresAt } = createTeacherSessionToken(teacherUid, expectedUsername, teacherRole);
+      if (teacherData?.sessionRevokedAt && Number(teacherData.sessionRevokedAt) > Date.now() && teacherUid !== DEFAULT_TEACHER_UID) {
+        await db.updateDoc('teachers', teacherUid, { sessionRevokedAt: Date.now() - 1 }).catch(() => {});
+      }
+
+      const sessionSecret = await getSessionSecret(db);
+      const { token, expiresAt } = createTeacherSessionToken(
+        teacherUid,
+        expectedUsername,
+        teacherRole,
+        sessionSecret
+      );
 
       let firebaseCustomToken: string | undefined;
       if (adminAuth) {
@@ -1212,11 +1402,6 @@ export function createApiApp(options?: { isServerless?: boolean }): Express {
         return res.status(401).json({ error: 'Teacher authentication required.' });
       }
 
-      const payload = verifyTeacherSessionToken(token);
-      if (!payload) {
-        return res.status(401).json({ error: 'Teacher session expired or invalid. Please sign in again.' });
-      }
-
       if (!db || db.mode !== 'admin') {
         return res.status(503).json({
           error: initState.errorMessage || 'Server-side Firebase Admin SDK is not configured in this environment.',
@@ -1224,25 +1409,66 @@ export function createApiApp(options?: { isServerless?: boolean }): Express {
         });
       }
 
-      const teacherSnap = await db.getDoc('teachers', payload.sub);
-      if (!teacherSnap.exists) {
+      const sessionSecret = await getSessionSecret(db);
+      const payload = verifyTeacherSessionToken(token, sessionSecret);
+      let teacherUid = payload?.sub || '';
+      let authenticatedViaFirebase = false;
+      let fbEmail = '';
+      let fbDisplayName = '';
+
+      if (payload) {
+        if (await isSessionTokenRevoked(db, payload.jti)) {
+          return res.status(401).json({ error: 'Teacher session has been signed out. Please sign in again.' });
+        }
+      } else {
+        const fbUser = await verifyFirebaseIdToken(token, adminAuth);
+        if (!fbUser || !fbUser.emailVerified) {
+          return res.status(401).json({ error: 'Teacher session expired or invalid. Please sign in again.' });
+        }
+        teacherUid = fbUser.uid;
+        authenticatedViaFirebase = true;
+        fbEmail = fbUser.email;
+        fbDisplayName = fbUser.displayName || '';
+      }
+
+      const teacherSnap = await db.getDoc('teachers', teacherUid);
+      const isBootstrapAdmin = BOOTSTRAP_ADMIN_EMAILS.has(fbEmail.toLowerCase());
+      if (!teacherSnap.exists && !(authenticatedViaFirebase && isBootstrapAdmin)) {
         return res.status(401).json({ error: 'Teacher account no longer exists.' });
       }
 
-      const teacherData = teacherSnap.data() || {};
+      const teacherData = teacherSnap.exists ? teacherSnap.data() || {} : {};
       if (teacherData.active === false) {
         return res.status(403).json({ error: 'Teacher account is inactive.' });
       }
-      if (teacherData.sessionRevokedAt && payload.iat < Number(teacherData.sessionRevokedAt)) {
+
+      const revokedTs = Number(teacherData.sessionRevokedAt);
+      if (
+        !authenticatedViaFirebase &&
+        payload &&
+        payload.sub !== DEFAULT_TEACHER_UID &&
+        Number.isFinite(revokedTs) &&
+        revokedTs > 0 &&
+        revokedTs <= Date.now() + 60_000 &&
+        payload.iat < revokedTs
+      ) {
         return res.status(401).json({ error: 'Teacher session has been signed out. Please sign in again.' });
       }
 
+      const resolvedRole: 'teacher' | 'admin' | 'super_admin' =
+        teacherData.role === 'admin' || teacherData.role === 'super_admin'
+          ? teacherData.role
+          : isBootstrapAdmin
+          ? 'admin'
+          : 'teacher';
+      const resolvedUsername = teacherData.username || payload?.username || DEFAULT_TEACHER_USERNAME;
+
       let firebaseCustomToken: string | undefined;
-      if (adminAuth) {
+      if (adminAuth && !authenticatedViaFirebase) {
         try {
-          firebaseCustomToken = await adminAuth.createCustomToken(teacherSnap.id, {
-            role: teacherData.role || 'teacher',
-            username: teacherData.username || payload.username,
+          firebaseCustomToken = await adminAuth.createCustomToken(teacherUid, {
+            role: resolvedRole,
+            username: resolvedUsername,
             email_verified: true,
           });
         } catch {
@@ -1250,15 +1476,20 @@ export function createApiApp(options?: { isServerless?: boolean }): Express {
         }
       }
 
+      const reissuedSession = authenticatedViaFirebase
+        ? createTeacherSessionToken(teacherUid, resolvedUsername, resolvedRole, sessionSecret)
+        : null;
+
       return res.json({
         success: true,
+        ...(reissuedSession ? { token: reissuedSession.token, expiresAt: reissuedSession.expiresAt } : {}),
         firebaseCustomToken,
         teacher: {
-          uid: teacherSnap.id,
-          username: teacherData.username || payload.username,
-          email: teacherData.email || 'teacher@sangururschool.edu.ke',
-          fullName: teacherData.fullName || 'Sangurur Staff Teacher',
-          role: teacherData.role || 'teacher',
+          uid: teacherUid,
+          username: resolvedUsername,
+          email: teacherData.email || fbEmail || 'teacher@sangururschool.edu.ke',
+          fullName: teacherData.fullName || fbDisplayName || 'Sangurur Staff Teacher',
+          role: resolvedRole,
           phone: teacherData.phone,
           active: teacherData.active ?? true,
           createdAt: teacherData.createdAt || new Date().toISOString(),
@@ -1275,15 +1506,9 @@ export function createApiApp(options?: { isServerless?: boolean }): Express {
   app.post('/api/auth/learner-login', async (req: Request, res: Response) => {
     const { db, adminAuth, initState } = getServerDbAdapter();
     try {
-      if (IS_PRODUCTION && !SESSION_SECRET_CONFIGURED) {
-        return res.status(503).json({
-          error: 'Server SESSION_SECRET is not configured. Set a 32+ character SESSION_SECRET in Netlify Environment Variables.',
-          code: 'MISSING_SESSION_SECRET',
-        });
-      }
       const { username: bodyUsername, digitalId: bodyDigitalId, password } = req.body || {};
       const username = bodyUsername || bodyDigitalId;
-      if (!username || !password) {
+      if (!username || password === undefined || password === null || !String(password).trim()) {
         return res.status(400).json({ error: 'Digital ID / Username and password are required' });
       }
 
@@ -1297,53 +1522,90 @@ export function createApiApp(options?: { isServerless?: boolean }): Express {
       }
 
       const cleanUsername = String(username).trim();
-      const cleanUpper = cleanUsername.toUpperCase();
-      const cleanLower = cleanUsername.toLowerCase();
+      const dashUnified = cleanUsername.replace(/[\u2010-\u2015\u2212]/g, '-');
+      const cleanUpper = dashUnified.toUpperCase();
+      const cleanLower = dashUnified.toLowerCase();
+      const canonicalNormalized = normalizeDigitalIdKey(cleanUsername);
 
-      let matches = await db.queryWhere('learners', [['username', '==', cleanUsername]]);
-      if (matches.length === 0) {
-        matches = await db.queryWhere('learners', [['username', '==', cleanUpper]]);
-      }
-      if (matches.length === 0) {
-        matches = await db.queryWhere('learners', [['username', '==', cleanLower]]);
-      }
-      if (matches.length === 0) {
-        matches = await db.queryWhere('learners', [['digitalId', '==', cleanUpper]]);
-      }
-      if (matches.length === 0) {
-        matches = await db.queryWhere('learners', [['learnerId', '==', cleanUpper]]);
+      const candidateVariants = Array.from(
+        new Set([cleanUsername, dashUnified, cleanUpper, cleanLower, canonicalNormalized].filter(Boolean))
+      );
+      const queryPromises: Promise<Array<{ id: string; data: () => Record<string, any> }>>[] = [];
+      for (const variant of candidateVariants) {
+        queryPromises.push(db.queryWhere('learners', [['username', '==', variant]]));
+        queryPromises.push(db.queryWhere('learners', [['digitalId', '==', variant]]));
+        queryPromises.push(db.queryWhere('learners', [['learnerId', '==', variant]]));
       }
 
-      if (matches.length === 0) {
+      const queryResults = await Promise.all(queryPromises);
+      const candidateMap = new Map<string, { id: string; data: () => Record<string, any> }>();
+      queryResults.forEach((list) => {
+        list.forEach((docItem) => {
+          if (!candidateMap.has(docItem.id)) {
+            candidateMap.set(docItem.id, docItem);
+          }
+        });
+      });
+
+      const rawPassword = String(password);
+      const findMatchingActive = (docsList: Array<{ id: string; data: () => Record<string, any> }>) => {
+        const active = docsList.filter((c) => {
+          const d = c.data() || {};
+          return d.status !== 'INACTIVE' && d.active !== false;
+        });
+        const matched = active.find((c) => verifyLearnerPassword(rawPassword, c.data() || {}));
+        return { active, matched };
+      };
+
+      let { active: activeCandidates, matched: learnerDoc } = findMatchingActive(
+        Array.from(candidateMap.values())
+      );
+
+      // Always run normalized collection scan if exact/variant query had no match or no password-verified active match
+      if (!learnerDoc && canonicalNormalized) {
+        const allLearnerDocs = await db.getCollectionDocs('learners');
+        allLearnerDocs.forEach((docItem) => {
+          const d = docItem.data() || {};
+          const keys = [d.digitalId, d.learnerId, d.username]
+            .filter(Boolean)
+            .map((v) => normalizeDigitalIdKey(String(v)));
+          if (keys.includes(canonicalNormalized)) {
+            candidateMap.set(docItem.id, docItem);
+          }
+        });
+        const rescan = findMatchingActive(Array.from(candidateMap.values()));
+        activeCandidates = rescan.active;
+        learnerDoc = rescan.matched;
+      }
+
+      if (candidateMap.size === 0) {
         return res.status(401).json({ error: 'Invalid Digital ID or password. Please verify with your teacher.' });
       }
 
-      const learnerDoc = matches[0];
-      const learnerData = learnerDoc.data() || {};
-
-      if (learnerData.status === 'INACTIVE' || learnerData.active === false) {
+      if (activeCandidates.length === 0) {
         return res.status(403).json({ error: 'Learner account is inactive. Please contact your school administrator.' });
       }
 
-      let isValid = false;
-      if (learnerData.passwordHash && learnerData.salt) {
-        const computedHash = hashPassword(String(password), learnerData.salt);
-        const computedBuf = Buffer.from(computedHash, 'utf8');
-        const storedBuf = Buffer.from(String(learnerData.passwordHash), 'utf8');
-        isValid =
-          computedBuf.length > 0 &&
-          computedBuf.length === storedBuf.length &&
-          crypto.timingSafeEqual(computedBuf, storedBuf);
-      } else {
-        isValid = String(password) === DEFAULT_INITIAL_PASSWORD;
-      }
-
-      if (!isValid) {
+      if (!learnerDoc) {
         return res.status(401).json({ error: 'Invalid Digital ID or password. Please check your access slip.' });
       }
 
+      const learnerData = learnerDoc.data() || {};
+      const nowMs = Date.now();
+      // Heal skewed future revocation/reset timestamps (e.g., written by a teacher PC with an ahead clock)
+      const skewedUpdates: Record<string, any> = {};
+      if (learnerData.sessionRevokedAt && Number(learnerData.sessionRevokedAt) > nowMs) {
+        skewedUpdates.sessionRevokedAt = nowMs - 1;
+      }
+      if (learnerData.passwordResetAt && Number(learnerData.passwordResetAt) > nowMs) {
+        skewedUpdates.passwordResetAt = nowMs - 1;
+      }
+      if (Object.keys(skewedUpdates).length > 0) {
+        await db.updateDoc('learners', learnerDoc.id, skewedUpdates).catch(() => {});
+      }
+
       const mustChangePassword = learnerData.mustChangePassword ?? learnerData.isFirstLogin ?? true;
-      const digitalId = learnerData.digitalId || learnerData.learnerId;
+      const digitalId = learnerData.digitalId || learnerData.learnerId || learnerData.username || learnerDoc.id;
 
       const learnerProfile = {
         id: learnerDoc.id,
@@ -1366,7 +1628,8 @@ export function createApiApp(options?: { isServerless?: boolean }): Express {
         grade: learnerData.grade || null,
       };
 
-      const { token, expiresAt } = createSessionToken(learnerDoc.id, digitalId);
+      const sessionSecret = await getSessionSecret(db);
+      const { token, expiresAt } = createSessionToken(learnerDoc.id, digitalId, sessionSecret, nowMs);
 
       let firebaseCustomToken: string | undefined;
       if (adminAuth) {
@@ -1401,6 +1664,12 @@ export function createApiApp(options?: { isServerless?: boolean }): Express {
     const { passwordHash, salt, ...safeProfile } = req.authLearner;
     return res.json({
       success: true,
+      ...(req.reissuedLearnerSession
+        ? {
+            token: req.reissuedLearnerSession.token,
+            expiresAt: req.reissuedLearnerSession.expiresAt,
+          }
+        : {}),
       learner: safeProfile,
     });
   });
@@ -1423,13 +1692,14 @@ export function createApiApp(options?: { isServerless?: boolean }): Express {
         return res.status(400).json({ error: 'New password is required' });
       }
 
-      if (newPassword === DEFAULT_INITIAL_PASSWORD) {
+      const cleanNewPassword = newPassword.trim();
+      if (cleanNewPassword === DEFAULT_INITIAL_PASSWORD) {
         return res.status(400).json({
           error: 'Your new password cannot be the default password (123456789). Please choose a private secure password.',
         });
       }
 
-      if (newPassword.length < 6) {
+      if (cleanNewPassword.length < 6) {
         return res.status(400).json({ error: 'New password must be at least 6 characters long' });
       }
 
@@ -1437,17 +1707,15 @@ export function createApiApp(options?: { isServerless?: boolean }): Express {
         if (!currentPassword) {
           return res.status(400).json({ error: 'Current password is required to update your password.' });
         }
-        const computedCurrent = authLearner.salt
-          ? hashPassword(String(currentPassword), authLearner.salt)
-          : null;
-        if (!computedCurrent || computedCurrent !== authLearner.passwordHash) {
+        if (!verifyLearnerPassword(String(currentPassword), authLearner)) {
           return res.status(401).json({ error: 'Current password is incorrect.' });
         }
       }
 
       const newSalt = generateSalt();
-      const newHash = hashPassword(newPassword, newSalt);
-      const revokedBeforeNew = Date.now();
+      const newHash = hashPassword(cleanNewPassword, newSalt);
+      const nowMs = Date.now();
+      const revokedBeforeNew = nowMs - 1;
 
       await db.updateDoc('learners', authLearner.id, {
         passwordHash: newHash,
@@ -1459,9 +1727,12 @@ export function createApiApp(options?: { isServerless?: boolean }): Express {
         updatedAt: new Date().toISOString(),
       });
 
+      const sessionSecret = await getSessionSecret(db);
       const refreshedSession = createSessionToken(
         authLearner.id,
-        authLearner.digitalId || authLearner.learnerId
+        authLearner.digitalId || authLearner.learnerId,
+        sessionSecret,
+        nowMs
       );
 
       await writeAuditLog(db, {
@@ -1737,8 +2008,12 @@ export function createApiApp(options?: { isServerless?: boolean }): Express {
       let digitalId = '';
       if (customDigitalId && String(customDigitalId).trim()) {
         digitalId = String(customDigitalId).trim().toUpperCase();
-        const dupDocs = await db.queryWhere('learners', [['digitalId', '==', digitalId]]);
-        if (dupDocs.length > 0) {
+        const [dupByDigital, dupByUsername, dupByLearnerId] = await Promise.all([
+          db.queryWhere('learners', [['digitalId', '==', digitalId]]),
+          db.queryWhere('learners', [['username', '==', digitalId]]),
+          db.queryWhere('learners', [['learnerId', '==', digitalId]]),
+        ]);
+        if (dupByDigital.length > 0 || dupByUsername.length > 0 || dupByLearnerId.length > 0) {
           return res.status(409).json({ error: `Digital ID ${digitalId} is already assigned to another learner.` });
         }
       } else {
@@ -2051,6 +2326,293 @@ export function createApiApp(options?: { isServerless?: boolean }): Express {
       });
     } catch (err: any) {
       const formatted = formatServerFirestoreError(err, db, 'Error resetting password');
+      return res.status(formatted.status).json({ error: formatted.message });
+    }
+  });
+
+  // Update Student Details (Authenticated Teacher Only)
+  app.post('/api/learners/update', requireTeacherAuth, async (req: AuthenticatedTeacherRequest, res: Response) => {
+    const { db } = getServerDbAdapter();
+    try {
+      if (!db) {
+        return res.status(503).json({ error: 'Database service unavailable' });
+      }
+      const authTeacher = req.authTeacher!;
+      const {
+        learnerId,
+        fullName,
+        schoolName,
+        grade,
+        cohortId,
+        levelId,
+        levelName,
+        classId,
+        className,
+        gender,
+        age,
+        guardianContact,
+        status,
+      } = req.body || {};
+
+      const cleanDocId = String(learnerId || '').trim();
+      if (!cleanDocId || cleanDocId.length > 128 || !/^[a-zA-Z0-9_\-]+$/.test(cleanDocId)) {
+        return res.status(400).json({ error: 'Valid learner document ID is required.' });
+      }
+
+      const cleanName = String(fullName || '').trim();
+      if (!cleanName || cleanName.length > 128) {
+        return res.status(400).json({ error: 'Full name is required and must be under 128 characters.' });
+      }
+
+      const snap = await db.getDoc('learners', cleanDocId);
+      if (!snap.exists) {
+        return res.status(404).json({ error: 'Learner account not found.' });
+      }
+      const existingLearner = snap.data() || {};
+
+      const hasSchoolWideAccess =
+        authTeacher.role === 'admin' ||
+        authTeacher.role === 'super_admin' ||
+        authTeacher.uid === DEFAULT_TEACHER_UID;
+
+      const existingCohorts: string[] = Array.isArray(existingLearner.assignedCohortIds)
+        ? existingLearner.assignedCohortIds.filter(Boolean).map((c: any) => String(c))
+        : [];
+
+      let allowedKeys = new Set<string>();
+      if (!hasSchoolWideAccess) {
+        const teacherCohorts = await db.queryWhere('cohorts', [['teacherId', '==', authTeacher.uid]]);
+        teacherCohorts.forEach((c) => {
+          allowedKeys.add(c.id);
+          if (c.data()?.code) allowedKeys.add(String(c.data()?.code));
+        });
+        const ownsExisting = existingCohorts.some((cid) => allowedKeys.has(cid));
+        if (!ownsExisting) {
+          return res.status(403).json({ error: 'Access denied: learner is not enrolled in any of your cohorts.' });
+        }
+      }
+
+      let targetCohortId = cohortId ? String(cohortId).trim() : existingCohorts[0] || '';
+      if (targetCohortId) {
+        const targetCohortSnap = await db.getDoc('cohorts', targetCohortId);
+        if (!targetCohortSnap.exists) {
+          return res.status(404).json({ error: 'Selected cohort was not found.' });
+        }
+        if (!hasSchoolWideAccess && targetCohortSnap.data()?.teacherId !== authTeacher.uid) {
+          return res.status(403).json({ error: 'Access denied: you are not assigned to the selected cohort.' });
+        }
+      }
+
+      let resolvedLevelId: string | null = levelId ? String(levelId).trim().slice(0, 128) : null;
+      let resolvedLevelName: string | null = levelName ? String(levelName).trim().slice(0, 128) : null;
+      let resolvedClassId: string | null = classId ? String(classId).trim().slice(0, 128) : null;
+      let resolvedClassName: string | null = className ? String(className).trim().slice(0, 128) : null;
+
+      if (resolvedClassId) {
+        const classSnap = await db.getDoc('cohortClasses', resolvedClassId);
+        if (classSnap.exists) {
+          const cls = classSnap.data() || {};
+          if (!targetCohortId || cls.cohortId === targetCohortId) {
+            resolvedClassId = classSnap.id;
+            resolvedClassName = cls.name ? String(cls.name).slice(0, 128) : resolvedClassName;
+            resolvedLevelId = cls.levelId ? String(cls.levelId).slice(0, 128) : resolvedLevelId;
+            resolvedLevelName = cls.levelName ? String(cls.levelName).slice(0, 128) : resolvedLevelName;
+          } else {
+            resolvedClassId = null;
+            resolvedClassName = null;
+            resolvedLevelId = null;
+            resolvedLevelName = null;
+          }
+        }
+      }
+
+      const validGenders = new Set(['male', 'female', 'other', 'prefer_not_to_say']);
+      const normalizedGender =
+        gender && validGenders.has(String(gender).trim()) ? String(gender).trim() : null;
+
+      let normalizedAge: number | null = null;
+      if (age !== undefined && age !== null && String(age).trim() !== '') {
+        const parsedAge = Number(age);
+        if (!Number.isFinite(parsedAge) || parsedAge < 3 || parsedAge > 25) {
+          return res.status(400).json({ error: 'Age must be a valid number between 3 and 25.' });
+        }
+        normalizedAge = Math.round(parsedAge);
+      }
+
+      const normalizedSchool =
+        schoolName && String(schoolName).trim()
+          ? String(schoolName).trim().slice(0, 128)
+          : 'Sangurur Comprehensive School';
+      const normalizedGrade =
+        grade && String(grade).trim() ? String(grade).trim().slice(0, 64) : null;
+      const normalizedGuardian =
+        guardianContact && String(guardianContact).trim()
+          ? String(guardianContact).trim().slice(0, 64)
+          : null;
+
+      const validStatuses = new Set(['ACTIVE', 'INACTIVE', 'ARCHIVED']);
+      const normalizedStatus =
+        status && validStatuses.has(String(status).trim().toUpperCase())
+          ? (String(status).trim().toUpperCase() as 'ACTIVE' | 'INACTIVE' | 'ARCHIVED')
+          : ((existingLearner.status as 'ACTIVE' | 'INACTIVE' | 'ARCHIVED') || 'ACTIVE');
+
+      const oldPrimaryCohortId = existingCohorts[0] || '';
+      const updatedAssignedCohortIds = targetCohortId
+        ? Array.from(
+            new Set([
+              targetCohortId,
+              ...existingCohorts.filter((c) => c !== oldPrimaryCohortId && c !== targetCohortId),
+            ])
+          ).slice(0, 20)
+        : existingCohorts;
+
+      const updatedAssignedClassIds = resolvedClassId ? [resolvedClassId] : [];
+      const nowIso = new Date().toISOString();
+
+      const updateFields: Record<string, any> = {
+        fullName: cleanName,
+        schoolName: normalizedSchool,
+        grade: normalizedGrade,
+        gender: normalizedGender,
+        age: normalizedAge,
+        guardianContact: normalizedGuardian,
+        assignedCohortIds: updatedAssignedCohortIds,
+        assignedClassIds: updatedAssignedClassIds,
+        levelId: resolvedLevelId,
+        levelName: resolvedLevelName,
+        classId: resolvedClassId,
+        className: resolvedClassName,
+        status: normalizedStatus,
+        active: normalizedStatus === 'ACTIVE',
+        updatedAt: nowIso,
+      };
+
+      await db.updateDoc('learners', cleanDocId, updateFields);
+
+      // Keep cohortMembers synchronized with primary cohort & class changes
+      if (oldPrimaryCohortId && targetCohortId && oldPrimaryCohortId !== targetCohortId) {
+        await db.deleteDoc('cohortMembers', `mem_${oldPrimaryCohortId}_${cleanDocId}`).catch(() => {});
+      }
+      if (targetCohortId) {
+        const memberId = `mem_${targetCohortId}_${cleanDocId}`;
+        const existingMem = await db.getDoc('cohortMembers', memberId);
+        const digitalId = String(existingLearner.digitalId || existingLearner.learnerId || existingLearner.username || '');
+        await db.setDoc('cohortMembers', memberId, {
+          id: memberId,
+          cohortId: targetCohortId,
+          learnerId: cleanDocId,
+          learnerName: cleanName,
+          learnerCode: digitalId,
+          ...(resolvedLevelId ? { levelId: resolvedLevelId, levelName: resolvedLevelName } : {}),
+          ...(resolvedClassId ? { classId: resolvedClassId, className: resolvedClassName } : {}),
+          joinedAt: existingMem.exists ? existingMem.data()?.joinedAt || nowIso : nowIso,
+          status: 'active',
+        });
+      }
+
+      await writeAuditLog(db, {
+        actorId: authTeacher.uid,
+        actorName: authTeacher.fullName,
+        actorRole: authTeacher.role,
+        action: 'UPDATE_LEARNER',
+        targetEntity: 'learner',
+        targetId: cleanDocId,
+        details: `Updated details for ${cleanName} (${existingLearner.digitalId || existingLearner.learnerId || cleanDocId}) — School: ${normalizedSchool}${normalizedGrade ? `, Grade: ${normalizedGrade}` : ''}, Status: ${normalizedStatus}.`,
+      });
+
+      const merged: Record<string, any> = {
+        ...existingLearner,
+        ...updateFields,
+        id: cleanDocId,
+      };
+      delete merged.passwordHash;
+      delete merged.salt;
+
+      return res.json({
+        success: true,
+        learner: merged,
+      });
+    } catch (err: any) {
+      console.error('Update learner error:', err);
+      const formatted = formatServerFirestoreError(err, db, 'Error updating student details');
+      return res.status(formatted.status).json({ error: formatted.message });
+    }
+  });
+
+  // Delete Student Record & Associated Enrollment/Register Data (Authenticated Teacher Only)
+  app.post('/api/learners/delete', requireTeacherAuth, async (req: AuthenticatedTeacherRequest, res: Response) => {
+    const { db } = getServerDbAdapter();
+    try {
+      if (!db) {
+        return res.status(503).json({ error: 'Database service unavailable' });
+      }
+      const authTeacher = req.authTeacher!;
+      const cleanDocId = String(req.body?.learnerId || '').trim();
+      if (!cleanDocId || cleanDocId.length > 128 || !/^[a-zA-Z0-9_\-]+$/.test(cleanDocId)) {
+        return res.status(400).json({ error: 'Valid learner document ID is required.' });
+      }
+
+      const snap = await db.getDoc('learners', cleanDocId);
+      if (!snap.exists) {
+        return res.status(404).json({ error: 'Learner account not found.' });
+      }
+      const existingLearner = snap.data() || {};
+
+      const hasSchoolWideAccess =
+        authTeacher.role === 'admin' ||
+        authTeacher.role === 'super_admin' ||
+        authTeacher.uid === DEFAULT_TEACHER_UID;
+
+      if (!hasSchoolWideAccess) {
+        const assignedCohortIds: string[] = Array.isArray(existingLearner.assignedCohortIds)
+          ? existingLearner.assignedCohortIds.filter(Boolean).map((c: any) => String(c))
+          : [];
+        const teacherCohorts = await db.queryWhere('cohorts', [['teacherId', '==', authTeacher.uid]]);
+        const allowedKeys = new Set<string>();
+        teacherCohorts.forEach((c) => {
+          allowedKeys.add(c.id);
+          if (c.data()?.code) allowedKeys.add(String(c.data()?.code));
+        });
+        const ownsAnyLearnerCohort = assignedCohortIds.some((cid) => allowedKeys.has(cid));
+        if (!ownsAnyLearnerCohort) {
+          return res.status(403).json({ error: 'Access denied: learner is not enrolled in any of your cohorts.' });
+        }
+      }
+
+      // Clean up related records first, then remove the learner document
+      const [memberDocs, registerDocs, feedbackDocs, certDocs] = await Promise.all([
+        db.queryWhere('cohortMembers', [['learnerId', '==', cleanDocId]]).catch(() => []),
+        db.queryWhere('dailyRegisters', [['learnerDocId', '==', cleanDocId]]).catch(() => []),
+        db.queryWhere('teacherFeedback', [['learnerDocId', '==', cleanDocId]]).catch(() => []),
+        db.queryWhere('masteryCertifications', [['learnerId', '==', cleanDocId]]).catch(() => []),
+      ]);
+
+      await Promise.all([
+        ...memberDocs.map((d) => db.deleteDoc('cohortMembers', d.id).catch(() => {})),
+        ...registerDocs.map((d) => db.deleteDoc('dailyRegisters', d.id).catch(() => {})),
+        ...feedbackDocs.map((d) => db.deleteDoc('teacherFeedback', d.id).catch(() => {})),
+        ...certDocs.map((d) => db.deleteDoc('masteryCertifications', d.id).catch(() => {})),
+      ]);
+
+      await db.deleteDoc('learners', cleanDocId);
+
+      await writeAuditLog(db, {
+        actorId: authTeacher.uid,
+        actorName: authTeacher.fullName,
+        actorRole: authTeacher.role,
+        action: 'DELETE_LEARNER',
+        targetEntity: 'learner',
+        targetId: cleanDocId,
+        details: `Deleted learner ${existingLearner.fullName || cleanDocId} (${existingLearner.digitalId || existingLearner.learnerId || 'No ID'}, School: ${existingLearner.schoolName || 'Sangurur Comprehensive School'}).`,
+      });
+
+      return res.json({
+        success: true,
+        deletedLearnerId: cleanDocId,
+      });
+    } catch (err: any) {
+      console.error('Delete learner error:', err);
+      const formatted = formatServerFirestoreError(err, db, 'Error deleting student record');
       return res.status(formatted.status).json({ error: formatted.message });
     }
   });
@@ -2561,6 +3123,249 @@ export function createApiApp(options?: { isServerless?: boolean }): Express {
       console.error('Historical attendance upload error:', err);
       const formatted = formatServerFirestoreError(err, db, 'Failed to upload historical attendance register');
       return res.status(formatted.status).json({ error: formatted.message });
+    }
+  });
+
+  // Verify Student Daily Register (Authenticated Teacher / Admin Only)
+  app.post('/api/attendance/verify', requireTeacherAuth, async (req: AuthenticatedTeacherRequest, res: Response) => {
+    const { db } = getServerDbAdapter();
+    try {
+      if (!db) {
+        return res.status(503).json({ error: 'Database service unavailable' });
+      }
+      const authTeacher = req.authTeacher!;
+      const registerId = String(req.body?.registerId || '').trim();
+      if (!registerId) {
+        return res.status(400).json({ error: 'Register ID is required.' });
+      }
+
+      const regSnap = await db.getDoc('dailyRegisters', registerId);
+      if (!regSnap.exists) {
+        return res.status(404).json({ error: 'Daily register entry was not found.' });
+      }
+
+      const existingData = regSnap.data() || {};
+      const hasSchoolWideAccess =
+        authTeacher.role === 'admin' ||
+        authTeacher.role === 'super_admin' ||
+        authTeacher.uid === DEFAULT_TEACHER_UID;
+
+      if (!hasSchoolWideAccess && existingData.cohortId) {
+        const cohortSnap = await db.getDoc('cohorts', String(existingData.cohortId));
+        if (!cohortSnap.exists || cohortSnap.data()?.teacherId !== authTeacher.uid) {
+          return res.status(403).json({ error: 'Access denied: you are not assigned to this cohort.' });
+        }
+      }
+
+      const reviewedAt = new Date().toISOString();
+      await db.updateDoc('dailyRegisters', registerId, {
+        verificationStatus: 'verified',
+        reviewedBy: authTeacher.uid,
+        reviewedAt,
+      });
+
+      await writeAuditLog(db, {
+        actorId: authTeacher.uid,
+        actorName: authTeacher.fullName,
+        actorRole: authTeacher.role,
+        action: 'VERIFY_ATTENDANCE',
+        targetEntity: 'dailyRegister',
+        targetId: registerId,
+        details: `Verified daily register for ${existingData.learnerName || existingData.learnerId || registerId} (${existingData.date || ''}).`,
+      });
+
+      return res.json({
+        success: true,
+        register: {
+          ...existingData,
+          id: registerId,
+          verificationStatus: 'verified',
+          reviewedBy: authTeacher.uid,
+          reviewedAt,
+        },
+      });
+    } catch (err: any) {
+      console.error('Verify register error:', err);
+      const formatted = formatServerFirestoreError(err, db, 'Failed to verify student register');
+      return res.status(formatted.status).json({ error: formatted.message, code: formatted.code });
+    }
+  });
+
+  // Correct Student Daily Register with Audit Trail (Authenticated Teacher / Admin Only)
+  app.post('/api/attendance/correct', requireTeacherAuth, async (req: AuthenticatedTeacherRequest, res: Response) => {
+    const { db } = getServerDbAdapter();
+    try {
+      if (!db) {
+        return res.status(503).json({ error: 'Database service unavailable' });
+      }
+      const authTeacher = req.authTeacher!;
+      const registerId = String(req.body?.registerId || '').trim();
+      const newStatus = String(req.body?.newStatus || '').trim().toLowerCase();
+      const reason = String(req.body?.reason || '').trim().slice(0, 1024);
+
+      if (!registerId || !reason) {
+        return res.status(400).json({ error: 'Register ID and correction reason are required.' });
+      }
+      if (!['present', 'late', 'absent', 'excused'].includes(newStatus)) {
+        return res.status(400).json({ error: 'Invalid attendance status.' });
+      }
+
+      const regSnap = await db.getDoc('dailyRegisters', registerId);
+      if (!regSnap.exists) {
+        return res.status(404).json({ error: 'Daily register entry was not found.' });
+      }
+
+      const existingData = regSnap.data() || {};
+      const hasSchoolWideAccess =
+        authTeacher.role === 'admin' ||
+        authTeacher.role === 'super_admin' ||
+        authTeacher.uid === DEFAULT_TEACHER_UID;
+
+      if (!hasSchoolWideAccess && existingData.cohortId) {
+        const cohortSnap = await db.getDoc('cohorts', String(existingData.cohortId));
+        if (!cohortSnap.exists || cohortSnap.data()?.teacherId !== authTeacher.uid) {
+          return res.status(403).json({ error: 'Access denied: you are not assigned to this cohort.' });
+        }
+      }
+
+      const reviewedAt = new Date().toISOString();
+      const prevHistory = Array.isArray(existingData.correctionHistory) ? existingData.correctionHistory : [];
+      const correctionEntry = {
+        correctedBy: authTeacher.uid,
+        correctedByName: authTeacher.fullName,
+        timestamp: reviewedAt,
+        previousStatus: existingData.status || 'present',
+        newStatus,
+        reason,
+      };
+      const nextHistory = [...prevHistory, correctionEntry];
+
+      await db.updateDoc('dailyRegisters', registerId, {
+        status: newStatus,
+        verificationStatus: 'corrected',
+        teacherNote: reason,
+        reviewedBy: authTeacher.uid,
+        reviewedAt,
+        correctionHistory: nextHistory,
+      });
+
+      await writeAuditLog(db, {
+        actorId: authTeacher.uid,
+        actorName: authTeacher.fullName,
+        actorRole: authTeacher.role,
+        action: 'CORRECT_ATTENDANCE',
+        targetEntity: 'dailyRegister',
+        targetId: registerId,
+        details: `Corrected status for ${existingData.learnerName || registerId} on ${existingData.date || ''} from ${existingData.status} to ${newStatus}. Reason: ${reason}`,
+      });
+
+      return res.json({
+        success: true,
+        register: {
+          ...existingData,
+          id: registerId,
+          status: newStatus,
+          verificationStatus: 'corrected',
+          teacherNote: reason,
+          reviewedBy: authTeacher.uid,
+          reviewedAt,
+          correctionHistory: nextHistory,
+        },
+      });
+    } catch (err: any) {
+      console.error('Correct attendance error:', err);
+      const formatted = formatServerFirestoreError(err, db, 'Failed to correct student register');
+      return res.status(formatted.status).json({ error: formatted.message, code: formatted.code });
+    }
+  });
+
+  // Mark Learner Absent or Excused (Authenticated Teacher / Admin Only)
+  app.post('/api/attendance/mark', requireTeacherAuth, async (req: AuthenticatedTeacherRequest, res: Response) => {
+    const { db } = getServerDbAdapter();
+    try {
+      if (!db) {
+        return res.status(503).json({ error: 'Database service unavailable' });
+      }
+      const authTeacher = req.authTeacher!;
+      const {
+        cohortId,
+        cohortCode,
+        learnerDocId,
+        learnerId,
+        learnerName,
+        date,
+        status,
+        reason,
+      } = req.body || {};
+
+      const cleanCohortId = String(cohortId || '').trim();
+      const cleanLearnerDocId = String(learnerDocId || '').trim();
+      const cleanDate = String(date || '').trim();
+      const cleanStatus = String(status || '').trim().toLowerCase();
+
+      if (!cleanCohortId || !cleanLearnerDocId || !cleanDate || !['absent', 'excused'].includes(cleanStatus)) {
+        return res.status(400).json({ error: 'Cohort, learner, date, and valid status (absent/excused) are required.' });
+      }
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(cleanDate)) {
+        return res.status(400).json({ error: 'Invalid date format. Expected YYYY-MM-DD.' });
+      }
+
+      const cohortSnap = await db.getDoc('cohorts', cleanCohortId);
+      if (!cohortSnap.exists) {
+        return res.status(404).json({ error: 'Selected cohort was not found.' });
+      }
+      const hasSchoolWideAccess =
+        authTeacher.role === 'admin' ||
+        authTeacher.role === 'super_admin' ||
+        authTeacher.uid === DEFAULT_TEACHER_UID;
+      if (!hasSchoolWideAccess && cohortSnap.data()?.teacherId !== authTeacher.uid) {
+        return res.status(403).json({ error: 'Access denied: you are not assigned to this cohort.' });
+      }
+
+      const docId = `reg_${cleanCohortId}_${cleanLearnerDocId}_${cleanDate}`;
+      const existingSnap = await db.getDoc('dailyRegisters', docId);
+      if (existingSnap.exists) {
+        return res.status(409).json({
+          error: `An attendance entry for ${learnerName || cleanLearnerDocId} on ${cleanDate} already exists (${existingSnap.data()?.status}). Use "Correct" to modify it with an audit trail.`,
+        });
+      }
+
+      const reviewedAt = new Date().toISOString();
+      const noteText = reason ? String(reason).trim().slice(0, 1024) : `Marked ${cleanStatus} by teacher`;
+      const record = {
+        id: docId,
+        cohortId: cleanCohortId,
+        cohortCode: String(cohortCode || cohortSnap.data()?.code || 'COHORT').slice(0, 64),
+        learnerDocId: cleanLearnerDocId,
+        learnerId: String(learnerId || cleanLearnerDocId).slice(0, 64),
+        learnerName: String(learnerName || 'Learner').slice(0, 128),
+        date: cleanDate,
+        timestamp: reviewedAt,
+        status: cleanStatus,
+        verificationStatus: 'verified',
+        teacherNote: noteText,
+        reviewedBy: authTeacher.uid,
+        reviewedAt,
+        correctionHistory: [],
+      };
+
+      await db.setDoc('dailyRegisters', docId, record);
+
+      await writeAuditLog(db, {
+        actorId: authTeacher.uid,
+        actorName: authTeacher.fullName,
+        actorRole: authTeacher.role,
+        action: 'TEACHER_MARK_ATTENDANCE',
+        targetEntity: 'dailyRegister',
+        targetId: docId,
+        details: `Teacher marked ${record.learnerName} (${record.learnerId}) as ${cleanStatus} for ${cleanDate}. Note: ${noteText}`,
+      });
+
+      return res.json({ success: true, register: record });
+    } catch (err: any) {
+      console.error('Mark attendance error:', err);
+      const formatted = formatServerFirestoreError(err, db, 'Failed to record teacher attendance entry');
+      return res.status(formatted.status).json({ error: formatted.message, code: formatted.code });
     }
   });
 

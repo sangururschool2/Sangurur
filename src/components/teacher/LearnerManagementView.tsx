@@ -19,12 +19,14 @@ import {
   generateSingleLoginSlipPDF,
 } from '../../services/pdfReportGenerator';
 import { useAuth } from '../../context/AuthContext';
-import { getTeacherAuthHeaders } from '../../utils/authHeaders';
+import { teacherFetch } from '../../utils/authHeaders';
 import { auth } from '../../services/firebase';
 import {
   createLearnerDirect,
   bulkImportLearnersDirect,
   resetLearnerPasswordDirect,
+  updateLearnerDirect,
+  deleteLearnerDirect,
   getWeeklyTimetable,
 } from '../../services/dataService';
 import { SchoolLogo } from '../common/SchoolLogo';
@@ -47,6 +49,8 @@ import {
   CreditCard,
   BookOpen,
   CalendarDays,
+  Pencil,
+  Trash2,
 } from 'lucide-react';
 
 interface LearnerManagementViewProps {
@@ -56,6 +60,7 @@ interface LearnerManagementViewProps {
   cohortClasses?: CohortClass[];
   onRefresh: () => Promise<void>;
   initialGradeFilter?: string;
+  initialSchoolFilter?: string;
 }
 
 export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
@@ -65,16 +70,21 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
   cohortClasses = [],
   onRefresh,
   initialGradeFilter = 'all',
+  initialSchoolFilter = 'all',
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [cohortFilter, setCohortFilter] = useState<string>('all');
   const [classFilter, setClassFilter] = useState<string>('all');
-  const [schoolFilter, setSchoolFilter] = useState<string>('all');
+  const [schoolFilter, setSchoolFilter] = useState<string>(initialSchoolFilter || 'all');
   const [gradeFilter, setGradeFilter] = useState<string>(initialGradeFilter || 'all');
 
   useEffect(() => {
     setGradeFilter(initialGradeFilter || 'all');
   }, [initialGradeFilter]);
+
+  useEffect(() => {
+    setSchoolFilter(initialSchoolFilter || 'all');
+  }, [initialSchoolFilter]);
 
   // Single Registration Modal
   const [showSingleModal, setShowSingleModal] = useState(false);
@@ -106,8 +116,9 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
 
   const { teacherProfile, teacherToken } = useAuth();
 
-  // Password Reset Confirmation & Success Modals
+  // Password Reset, Edit & Delete Confirmation Modals
   const [actionError, setActionError] = useState<string | null>(null);
+  const [actionSuccess, setActionSuccess] = useState<string | null>(null);
   const [confirmResetTarget, setConfirmResetTarget] = useState<Learner | null>(null);
   const [resettingId, setResettingId] = useState<string | null>(null);
   const [resetSuccessModal, setResetSuccessModal] = useState<{
@@ -117,6 +128,24 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
     newInitialPassword: string;
     cohortName: string;
   } | null>(null);
+
+  // Edit Student Details Modal state
+  const [editingLearner, setEditingLearner] = useState<Learner | null>(null);
+  const [editFullName, setEditFullName] = useState('');
+  const [editSchoolName, setEditSchoolName] = useState('Sangurur Comprehensive School');
+  const [editGrade, setEditGrade] = useState('Grade 7');
+  const [editCohortId, setEditCohortId] = useState('');
+  const [editClassId, setEditClassId] = useState('');
+  const [editGender, setEditGender] = useState<'male' | 'female' | 'other' | 'prefer_not_to_say' | ''>('male');
+  const [editAge, setEditAge] = useState<number | ''>('');
+  const [editGuardian, setEditGuardian] = useState('');
+  const [editStatus, setEditStatus] = useState<'ACTIVE' | 'INACTIVE'>('ACTIVE');
+  const [savingEdit, setSavingEdit] = useState(false);
+  const [editError, setEditError] = useState<string | null>(null);
+
+  // Delete Student Confirmation Modal state
+  const [confirmDeleteTarget, setConfirmDeleteTarget] = useState<Learner | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
 
   // Newly Created Learner Slip Modal
   const [newlyCreatedSlip, setNewlyCreatedSlip] = useState<{
@@ -137,13 +166,28 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
   const [newPasswordMap, setNewPasswordMap] = useState<Record<string, string>>({});
 
   const distinctSchools = useMemo(() => {
-    const set = new Set<string>(['Sangurur Comprehensive School']);
+    const byKey = new Map<string, string>();
+    byKey.set('sangurur comprehensive school', 'Sangurur Comprehensive School');
     learners.forEach((lr) => {
-      const s = (lr.schoolName || 'Sangurur Comprehensive School').trim();
-      if (s) set.add(s);
+      const cleaned = (lr.schoolName || 'Sangurur Comprehensive School').trim().replace(/\s+/g, ' ');
+      if (!cleaned) return;
+      const key = cleaned.toLowerCase();
+      if (!byKey.has(key)) {
+        byKey.set(key, cleaned);
+      }
     });
-    return Array.from(set).sort((a, b) => a.localeCompare(b));
+    return Array.from(byKey.values()).sort((a, b) => a.localeCompare(b));
   }, [learners]);
+
+  const editCohortClasses = useMemo(
+    () => cohortClasses.filter((c) => c.cohortId === editCohortId),
+    [cohortClasses, editCohortId]
+  );
+
+  const selectedEditClass = useMemo(
+    () => editCohortClasses.find((c) => c.id === editClassId) || null,
+    [editCohortClasses, editClassId]
+  );
 
   const singleCohortClasses = useMemo(
     () => cohortClasses.filter((c) => c.cohortId === singleCohortId),
@@ -232,7 +276,7 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
 
   // Filter learners
   const filteredLearners = learners.filter((lr) => {
-    const lrSchool = (lr.schoolName || 'Sangurur Comprehensive School').trim();
+    const lrSchool = (lr.schoolName || 'Sangurur Comprehensive School').trim().replace(/\s+/g, ' ');
     const assignedCohort = cohorts.find((c) => (lr.assignedCohortIds || []).includes(c.id));
     const lrTier = classifyEducationLevel(lr.grade, assignedCohort?.learningLevel);
     const matchesSearch =
@@ -250,7 +294,9 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
       classFilter === 'all' ||
       lr.classId === classFilter ||
       (lr.assignedClassIds || []).includes(classFilter);
-    const matchesSchool = schoolFilter === 'all' || lrSchool === schoolFilter;
+    const matchesSchool =
+      schoolFilter === 'all' ||
+      lrSchool.toLowerCase() === schoolFilter.trim().replace(/\s+/g, ' ').toLowerCase();
     const matchesGrade =
       gradeFilter === 'all' ||
       (gradeFilter.startsWith('level:')
@@ -272,29 +318,11 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
 
     try {
       let createdLearner: Learner;
-      if (!teacherToken && auth.currentUser) {
-        createdLearner = await createLearnerDirect({
-          fullName: singleName,
-          schoolName: singleSchoolName.trim() || 'Sangurur Comprehensive School',
-          grade: singleGrade,
-          cohortId: singleCohortId,
-          levelId: chosenClass?.levelId || chosenLevel?.id,
-          levelName: chosenClass?.levelName || chosenLevel?.name,
-          classId: chosenClass?.id,
-          className: chosenClass?.name,
-          gender: singleGender,
-          age: singleAge || undefined,
-          guardianContact: singleGuardian,
-          customDigitalId: singleCustomId || undefined,
-          teacherId: teacherProfile?.uid || auth.currentUser.uid,
-          teacherName: teacherProfile?.fullName || 'Staff Teacher',
-          teacherRole: teacherProfile?.role,
-        });
-      } else {
-        const headers = await getTeacherAuthHeaders(teacherToken);
-        const res = await fetch('/api/learners/create', {
+      let usedFallback = false;
+      try {
+        const res = await teacherFetch('/api/learners/create', teacherToken, {
           method: 'POST',
-          headers,
+          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             fullName: singleName,
             schoolName: singleSchoolName.trim() || 'Sangurur Comprehensive School',
@@ -313,11 +341,59 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
           }),
         });
 
-        const data = await res.json();
-        if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        if (res.ok && data.learner) {
+          createdLearner = data.learner;
+        } else if (
+          (res.status === 503 ||
+            data?.code === 'MISSING_ADMIN_SDK' ||
+            data?.code === 'MISSING_SERVICE_ACCOUNT_JSON' ||
+            data?.code === 'FIREBASE_ADMIN_AUTH_FAILED') &&
+          auth.currentUser
+        ) {
+          usedFallback = true;
+          createdLearner = await createLearnerDirect({
+            fullName: singleName,
+            schoolName: singleSchoolName.trim() || 'Sangurur Comprehensive School',
+            grade: singleGrade,
+            cohortId: singleCohortId,
+            levelId: chosenClass?.levelId || chosenLevel?.id,
+            levelName: chosenClass?.levelName || chosenLevel?.name,
+            classId: chosenClass?.id,
+            className: chosenClass?.name,
+            gender: singleGender,
+            age: singleAge || undefined,
+            guardianContact: singleGuardian,
+            customDigitalId: singleCustomId || undefined,
+            teacherId: teacherProfile?.uid || auth.currentUser.uid,
+            teacherName: teacherProfile?.fullName || 'Staff Teacher',
+            teacherRole: teacherProfile?.role,
+          });
+        } else {
           throw new Error(data.error || 'Failed to create learner');
         }
-        createdLearner = data.learner;
+      } catch (apiErr: any) {
+        if (!usedFallback && apiErr instanceof TypeError && auth.currentUser) {
+          createdLearner = await createLearnerDirect({
+            fullName: singleName,
+            schoolName: singleSchoolName.trim() || 'Sangurur Comprehensive School',
+            grade: singleGrade,
+            cohortId: singleCohortId,
+            levelId: chosenClass?.levelId || chosenLevel?.id,
+            levelName: chosenClass?.levelName || chosenLevel?.name,
+            classId: chosenClass?.id,
+            className: chosenClass?.name,
+            gender: singleGender,
+            age: singleAge || undefined,
+            guardianContact: singleGuardian,
+            customDigitalId: singleCustomId || undefined,
+            teacherId: teacherProfile?.uid || auth.currentUser.uid,
+            teacherName: teacherProfile?.fullName || 'Staff Teacher',
+            teacherRole: teacherProfile?.role,
+          });
+        } else {
+          throw apiErr;
+        }
       }
 
       const assignedCohort = cohorts.find((c) => c.id === singleCohortId);
@@ -406,23 +482,11 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
 
     try {
       let data: { createdCount: number; learners: Learner[] };
-      if (!teacherToken && auth.currentUser) {
-        data = await bulkImportLearnersDirect({
-          cohortId: bulkCohortId,
-          levelId: chosenBulkClass?.levelId || chosenBulkLevel?.id,
-          levelName: chosenBulkClass?.levelName || chosenBulkLevel?.name,
-          classId: chosenBulkClass?.id,
-          className: chosenBulkClass?.name,
-          learners: validRows,
-          teacherId: teacherProfile?.uid || auth.currentUser.uid,
-          teacherName: teacherProfile?.fullName || 'Staff Teacher',
-          teacherRole: teacherProfile?.role,
-        });
-      } else {
-        const headers = await getTeacherAuthHeaders(teacherToken);
-        const res = await fetch('/api/learners/bulk-import', {
+      let usedFallback = false;
+      try {
+        const res = await teacherFetch('/api/learners/bulk-import', teacherToken, {
           method: 'POST',
-          headers,
+          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             cohortId: bulkCohortId,
             levelId: chosenBulkClass?.levelId || chosenBulkLevel?.id,
@@ -435,9 +499,47 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
           }),
         });
 
-        const json = await res.json();
-        if (!res.ok) throw new Error(json.error || 'Failed to import learners');
-        data = json;
+        const json = await res.json().catch(() => ({}));
+        if (res.ok) {
+          data = json;
+        } else if (
+          (res.status === 503 ||
+            json?.code === 'MISSING_ADMIN_SDK' ||
+            json?.code === 'MISSING_SERVICE_ACCOUNT_JSON' ||
+            json?.code === 'FIREBASE_ADMIN_AUTH_FAILED') &&
+          auth.currentUser
+        ) {
+          usedFallback = true;
+          data = await bulkImportLearnersDirect({
+            cohortId: bulkCohortId,
+            levelId: chosenBulkClass?.levelId || chosenBulkLevel?.id,
+            levelName: chosenBulkClass?.levelName || chosenBulkLevel?.name,
+            classId: chosenBulkClass?.id,
+            className: chosenBulkClass?.name,
+            learners: validRows,
+            teacherId: teacherProfile?.uid || auth.currentUser.uid,
+            teacherName: teacherProfile?.fullName || 'Staff Teacher',
+            teacherRole: teacherProfile?.role,
+          });
+        } else {
+          throw new Error(json.error || 'Failed to import learners');
+        }
+      } catch (apiErr: any) {
+        if (!usedFallback && apiErr instanceof TypeError && auth.currentUser) {
+          data = await bulkImportLearnersDirect({
+            cohortId: bulkCohortId,
+            levelId: chosenBulkClass?.levelId || chosenBulkLevel?.id,
+            levelName: chosenBulkClass?.levelName || chosenBulkLevel?.name,
+            classId: chosenBulkClass?.id,
+            className: chosenBulkClass?.name,
+            learners: validRows,
+            teacherId: teacherProfile?.uid || auth.currentUser.uid,
+            teacherName: teacherProfile?.fullName || 'Staff Teacher',
+            teacherRole: teacherProfile?.role,
+          });
+        } else {
+          throw apiErr;
+        }
       }
 
       const pwdMap: Record<string, string> = { ...newPasswordMap };
@@ -466,27 +568,48 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
     setActionError(null);
     try {
       let data: { digitalId?: string; initialPassword?: string };
-      if (!teacherToken && auth.currentUser) {
-        data = await resetLearnerPasswordDirect({
-          learnerId: learner.id,
-          teacherId: teacherProfile?.uid || auth.currentUser.uid,
-          teacherName: teacherProfile?.fullName || 'Staff Teacher',
-          teacherRole: teacherProfile?.role,
-        });
-      } else {
-        const headers = await getTeacherAuthHeaders(teacherToken);
-        const res = await fetch('/api/learners/reset-password', {
+      let usedFallback = false;
+      try {
+        const res = await teacherFetch('/api/learners/reset-password', teacherToken, {
           method: 'POST',
-          headers,
+          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             learnerId: learner.id,
             teacherId: teacherProfile?.uid || 'teacher_staff',
             teacherName: teacherProfile?.fullName || 'Staff Teacher',
           }),
         });
-        const json = await res.json();
-        if (!res.ok) throw new Error(json.error || 'Failed to reset password');
-        data = json;
+        const json = await res.json().catch(() => ({}));
+        if (res.ok) {
+          data = json;
+        } else if (
+          (res.status === 503 ||
+            json?.code === 'MISSING_ADMIN_SDK' ||
+            json?.code === 'MISSING_SERVICE_ACCOUNT_JSON' ||
+            json?.code === 'FIREBASE_ADMIN_AUTH_FAILED') &&
+          auth.currentUser
+        ) {
+          usedFallback = true;
+          data = await resetLearnerPasswordDirect({
+            learnerId: learner.id,
+            teacherId: teacherProfile?.uid || auth.currentUser.uid,
+            teacherName: teacherProfile?.fullName || 'Staff Teacher',
+            teacherRole: teacherProfile?.role,
+          });
+        } else {
+          throw new Error(json.error || 'Failed to reset password');
+        }
+      } catch (apiErr: any) {
+        if (!usedFallback && apiErr instanceof TypeError && auth.currentUser) {
+          data = await resetLearnerPasswordDirect({
+            learnerId: learner.id,
+            teacherId: teacherProfile?.uid || auth.currentUser.uid,
+            teacherName: teacherProfile?.fullName || 'Staff Teacher',
+            teacherRole: teacherProfile?.role,
+          });
+        } else {
+          throw apiErr;
+        }
       }
 
       const assignedCohort = cohorts.find((c) => (learner.assignedCohortIds || []).includes(c.id));
@@ -512,6 +635,191 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
       setConfirmResetTarget(null);
     } finally {
       setResettingId(null);
+    }
+  };
+
+  // Open Edit Student Details Modal
+  const openEditModal = (learner: Learner) => {
+    const primaryCohortId = learner.assignedCohortIds?.[0] || cohorts[0]?.id || '';
+    const classesForCohort = cohortClasses.filter((c) => c.cohortId === primaryCohortId);
+    const matchedClassId =
+      learner.classId && classesForCohort.some((c) => c.id === learner.classId)
+        ? learner.classId
+        : learner.assignedClassIds?.[0] && classesForCohort.some((c) => c.id === learner.assignedClassIds?.[0])
+        ? learner.assignedClassIds[0]
+        : '';
+
+    setEditingLearner(learner);
+    setEditFullName(learner.fullName || '');
+    setEditSchoolName(learner.schoolName || 'Sangurur Comprehensive School');
+    setEditGrade(learner.grade || 'Grade 7');
+    setEditCohortId(primaryCohortId);
+    setEditClassId(matchedClassId);
+    setEditGender(learner.gender || '');
+    setEditAge(learner.age ?? '');
+    setEditGuardian(learner.guardianContact || '');
+    setEditStatus(learner.status === 'INACTIVE' || learner.active === false ? 'INACTIVE' : 'ACTIVE');
+    setEditError(null);
+  };
+
+  // Save Edited Student Details
+  const handleEditSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingLearner) return;
+    setSavingEdit(true);
+    setEditError(null);
+    setActionError(null);
+    setActionSuccess(null);
+
+    const chosenClass = selectedEditClass;
+    const chosenLevel = chosenClass
+      ? cohortLevels.find((l) => l.id === chosenClass.levelId)
+      : undefined;
+
+    try {
+      let usedFallback = false;
+      try {
+        const res = await teacherFetch('/api/learners/update', teacherToken, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            learnerId: editingLearner.id,
+            fullName: editFullName.trim(),
+            schoolName: editSchoolName.trim() || 'Sangurur Comprehensive School',
+            grade: editGrade.trim(),
+            cohortId: editCohortId || undefined,
+            levelId: chosenClass?.levelId || chosenLevel?.id || undefined,
+            levelName: chosenClass?.levelName || chosenLevel?.name || undefined,
+            classId: chosenClass?.id || undefined,
+            className: chosenClass?.name || undefined,
+            gender: editGender || null,
+            age: editAge === '' ? null : Number(editAge),
+            guardianContact: editGuardian.trim() || null,
+            status: editStatus,
+          }),
+        });
+        const json = await res.json().catch(() => ({}));
+        if (res.ok && json.learner) {
+          // updated via backend
+        } else if (
+          (res.status === 503 ||
+            json?.code === 'MISSING_ADMIN_SDK' ||
+            json?.code === 'MISSING_SERVICE_ACCOUNT_JSON' ||
+            json?.code === 'FIREBASE_ADMIN_AUTH_FAILED') &&
+          auth.currentUser
+        ) {
+          usedFallback = true;
+          await updateLearnerDirect({
+            learnerId: editingLearner.id,
+            fullName: editFullName.trim(),
+            schoolName: editSchoolName.trim() || 'Sangurur Comprehensive School',
+            grade: editGrade.trim(),
+            cohortId: editCohortId || undefined,
+            levelId: chosenClass?.levelId || chosenLevel?.id || undefined,
+            levelName: chosenClass?.levelName || chosenLevel?.name || undefined,
+            classId: chosenClass?.id || undefined,
+            className: chosenClass?.name || undefined,
+            gender: editGender || '',
+            age: editAge === '' ? null : Number(editAge),
+            guardianContact: editGuardian.trim() || undefined,
+            status: editStatus,
+            teacherId: teacherProfile?.uid || auth.currentUser.uid,
+            teacherName: teacherProfile?.fullName || 'Staff Teacher',
+            teacherRole: teacherProfile?.role,
+          });
+        } else {
+          throw new Error(json.error || 'Failed to update student details');
+        }
+      } catch (apiErr: any) {
+        if (!usedFallback && apiErr instanceof TypeError && auth.currentUser) {
+          await updateLearnerDirect({
+            learnerId: editingLearner.id,
+            fullName: editFullName.trim(),
+            schoolName: editSchoolName.trim() || 'Sangurur Comprehensive School',
+            grade: editGrade.trim(),
+            cohortId: editCohortId || undefined,
+            levelId: chosenClass?.levelId || chosenLevel?.id || undefined,
+            levelName: chosenClass?.levelName || chosenLevel?.name || undefined,
+            classId: chosenClass?.id || undefined,
+            className: chosenClass?.name || undefined,
+            gender: editGender || '',
+            age: editAge === '' ? null : Number(editAge),
+            guardianContact: editGuardian.trim() || undefined,
+            status: editStatus,
+            teacherId: teacherProfile?.uid || auth.currentUser.uid,
+            teacherName: teacherProfile?.fullName || 'Staff Teacher',
+            teacherRole: teacherProfile?.role,
+          });
+        } else {
+          throw apiErr;
+        }
+      }
+
+      const updatedName = editFullName.trim();
+      setEditingLearner(null);
+      setActionSuccess(`Student details updated for ${updatedName}.`);
+      await onRefresh();
+    } catch (err: any) {
+      setEditError(err.message || 'Error updating student details');
+    } finally {
+      setSavingEdit(false);
+    }
+  };
+
+  // Confirmed Delete Student Record
+  const executeDeleteLearner = async (learner: Learner) => {
+    setDeletingId(learner.id);
+    setActionError(null);
+    setActionSuccess(null);
+    try {
+      let usedFallback = false;
+      try {
+        const res = await teacherFetch('/api/learners/delete', teacherToken, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ learnerId: learner.id }),
+        });
+        const json = await res.json().catch(() => ({}));
+        if (res.ok) {
+          // deleted via backend
+        } else if (
+          (res.status === 503 ||
+            json?.code === 'MISSING_ADMIN_SDK' ||
+            json?.code === 'MISSING_SERVICE_ACCOUNT_JSON' ||
+            json?.code === 'FIREBASE_ADMIN_AUTH_FAILED') &&
+          auth.currentUser
+        ) {
+          usedFallback = true;
+          await deleteLearnerDirect({
+            learnerId: learner.id,
+            teacherId: teacherProfile?.uid || auth.currentUser.uid,
+            teacherName: teacherProfile?.fullName || 'Staff Teacher',
+            teacherRole: teacherProfile?.role,
+          });
+        } else {
+          throw new Error(json.error || 'Failed to delete student record');
+        }
+      } catch (apiErr: any) {
+        if (!usedFallback && apiErr instanceof TypeError && auth.currentUser) {
+          await deleteLearnerDirect({
+            learnerId: learner.id,
+            teacherId: teacherProfile?.uid || auth.currentUser.uid,
+            teacherName: teacherProfile?.fullName || 'Staff Teacher',
+            teacherRole: teacherProfile?.role,
+          });
+        } else {
+          throw apiErr;
+        }
+      }
+
+      setConfirmDeleteTarget(null);
+      setActionSuccess(`Removed ${learner.fullName} (${learner.digitalId || learner.learnerId}) from the register.`);
+      await onRefresh();
+    } catch (err: any) {
+      setActionError(err.message || 'Error deleting student record');
+      setConfirmDeleteTarget(null);
+    } finally {
+      setDeletingId(null);
     }
   };
 
@@ -594,6 +902,22 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
             type="button"
             onClick={() => setActionError(null)}
             className="text-rose-500 hover:text-rose-800"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
+      {actionSuccess && (
+        <div className="p-3.5 bg-emerald-50 border border-emerald-200 rounded-xl text-sm text-emerald-800 flex items-center justify-between gap-3">
+          <div className="flex items-center space-x-2">
+            <CheckCircle className="w-4 h-4 text-emerald-600 shrink-0" />
+            <span>{actionSuccess}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setActionSuccess(null)}
+            className="text-emerald-600 hover:text-emerald-900"
           >
             <X className="w-4 h-4" />
           </button>
@@ -803,10 +1127,17 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
                         </div>
                       </td>
                       <td className="py-3 px-4">
-                        <span className="px-2.5 py-0.5 rounded-full bg-emerald-100 text-emerald-800 font-bold text-xs inline-flex items-center space-x-1">
-                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-600 inline-block"></span>
-                          <span>{lr.status || 'ACTIVE'}</span>
-                        </span>
+                        {lr.status === 'INACTIVE' || lr.active === false ? (
+                          <span className="px-2.5 py-0.5 rounded-full bg-slate-200 text-slate-700 font-bold text-xs inline-flex items-center space-x-1">
+                            <span className="w-1.5 h-1.5 rounded-full bg-slate-500 inline-block"></span>
+                            <span>INACTIVE</span>
+                          </span>
+                        ) : (
+                          <span className="px-2.5 py-0.5 rounded-full bg-emerald-100 text-emerald-800 font-bold text-xs inline-flex items-center space-x-1">
+                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-600 inline-block"></span>
+                            <span>{lr.status || 'ACTIVE'}</span>
+                          </span>
+                        )}
                       </td>
                       <td className="py-3 px-4">
                         {lr.mustChangePassword || lr.isFirstLogin ? (
@@ -826,8 +1157,30 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
                         )}
                       </td>
                       <td className="py-3 px-4 text-right">
-                        <div className="flex items-center justify-end space-x-1.5">
+                        <div className="flex items-center justify-end flex-wrap gap-1.5">
                           <button
+                            type="button"
+                            onClick={() => openEditModal(lr)}
+                            className="py-1.5 px-2.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 rounded-lg text-xs font-semibold transition inline-flex items-center space-x-1 shadow-2xs"
+                            title="Edit student details"
+                          >
+                            <Pencil className="w-3.5 h-3.5 text-emerald-700" />
+                            <span>Edit</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => setConfirmDeleteTarget(lr)}
+                            disabled={deletingId === lr.id}
+                            className="py-1.5 px-2.5 bg-rose-50 hover:bg-rose-100 text-rose-800 border border-rose-200 rounded-lg text-xs font-semibold transition inline-flex items-center space-x-1 shadow-2xs"
+                            title="Delete student record"
+                          >
+                            <Trash2 className="w-3.5 h-3.5 text-rose-700" />
+                            <span>{deletingId === lr.id ? 'Deleting...' : 'Delete'}</span>
+                          </button>
+
+                          <button
+                            type="button"
                             onClick={() =>
                               setIdCardTarget({
                                 learner: lr,
@@ -842,6 +1195,7 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
                           </button>
 
                           <button
+                            type="button"
                             onClick={() => {
                               generateSingleLoginSlipPDF(
                                 lr,
@@ -857,6 +1211,7 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
                           </button>
 
                           <button
+                            type="button"
                             onClick={() => setConfirmResetTarget(lr)}
                             disabled={resettingId === lr.id}
                             className="py-1.5 px-2.5 bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-200 rounded-lg text-xs font-semibold transition inline-flex items-center space-x-1 shadow-2xs"
@@ -1594,6 +1949,277 @@ export const LearnerManagementView: React.FC<LearnerManagementViewProps> = ({
           </div>
         </div>
       )}
+      {/* EDIT STUDENT DETAILS MODAL */}
+      {editingLearner && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-md w-full shadow-2xl border border-slate-200 overflow-hidden max-h-[92vh] flex flex-col">
+            <div className="bg-emerald-800 p-5 text-white flex justify-between items-center shrink-0">
+              <div>
+                <h3 className="font-extrabold text-base tracking-tight">
+                  Edit Student Details
+                </h3>
+                <p className="text-emerald-100 text-xs font-mono mt-0.5">
+                  Digital ID: {editingLearner.digitalId || editingLearner.learnerId}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEditingLearner(null)}
+                className="text-white/70 hover:text-white"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleEditSubmit} className="p-6 space-y-4 overflow-y-auto flex-1">
+              {editError && (
+                <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-sm text-rose-800">
+                  {editError}
+                </div>
+              )}
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
+                  Full Name *
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={editFullName}
+                  onChange={(e) => setEditFullName(e.target.value)}
+                  className="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-sm focus:ring-2 focus:ring-emerald-600 outline-none"
+                />
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
+                    School Name *
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    list="registered-schools-list"
+                    value={editSchoolName}
+                    onChange={(e) => setEditSchoolName(e.target.value)}
+                    className="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-sm focus:ring-2 focus:ring-emerald-600 outline-none"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
+                    Grade / Class *
+                  </label>
+                  <select
+                    required
+                    value={editGrade}
+                    onChange={(e) => setEditGrade(e.target.value)}
+                    className="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-sm font-semibold focus:ring-2 focus:ring-emerald-600 outline-none"
+                  >
+                    {!EDUCATION_LEVEL_BANDS.some((b) => b.grades.includes(editGrade)) && editGrade && (
+                      <option value={editGrade}>{editGrade}</option>
+                    )}
+                    {EDUCATION_LEVEL_BANDS.map((band) => (
+                      <optgroup key={band.key} label={`${band.label} (${band.shortRange})`}>
+                        {band.grades.map((g) => (
+                          <option key={g} value={g}>
+                            {g}
+                          </option>
+                        ))}
+                      </optgroup>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
+                  Primary Cohort Assignment *
+                </label>
+                <select
+                  required
+                  value={editCohortId}
+                  onChange={(e) => {
+                    const nextCohortId = e.target.value;
+                    setEditCohortId(nextCohortId);
+                    const nextClasses = cohortClasses.filter((c) => c.cohortId === nextCohortId);
+                    setEditClassId(nextClasses[0]?.id || '');
+                  }}
+                  className="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-sm focus:ring-2 focus:ring-emerald-600 outline-none"
+                >
+                  {cohorts.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name} ({c.code})
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {editCohortClasses.length > 0 && (
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
+                    Level & Class Assignment
+                  </label>
+                  <select
+                    value={editClassId}
+                    onChange={(e) => setEditClassId(e.target.value)}
+                    className="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-sm font-semibold focus:ring-2 focus:ring-emerald-600 outline-none"
+                  >
+                    <option value="">No specific class selected</option>
+                    {cohortLevels
+                      .filter((l) => l.cohortId === editCohortId)
+                      .map((lvl) => {
+                        const classesInLvl = editCohortClasses.filter((c) => c.levelId === lvl.id);
+                        if (classesInLvl.length === 0) return null;
+                        return (
+                          <optgroup key={lvl.id} label={lvl.name}>
+                            {classesInLvl.map((cls) => (
+                              <option key={cls.id} value={cls.id}>
+                                {cls.name} ({cls.code}) {cls.gradeBand ? `• ${cls.gradeBand}` : ''}
+                              </option>
+                            ))}
+                          </optgroup>
+                        );
+                      })}
+                    {editCohortClasses
+                      .filter((c) => !cohortLevels.some((l) => l.id === c.levelId))
+                      .map((cls) => (
+                        <option key={cls.id} value={cls.id}>
+                          {cls.levelName ? `${cls.levelName} → ` : ''}{cls.name} ({cls.code})
+                        </option>
+                      ))}
+                  </select>
+                </div>
+              )}
+
+              <div className="grid grid-cols-3 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
+                    Gender
+                  </label>
+                  <select
+                    value={editGender}
+                    onChange={(e) => setEditGender(e.target.value as any)}
+                    className="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-sm focus:ring-2 focus:ring-emerald-600 outline-none"
+                  >
+                    <option value="">Unspecified</option>
+                    <option value="male">Male</option>
+                    <option value="female">Female</option>
+                    <option value="other">Other</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
+                    Age
+                  </label>
+                  <input
+                    type="number"
+                    min={3}
+                    max={25}
+                    value={editAge}
+                    onChange={(e) => setEditAge(e.target.value ? Number(e.target.value) : '')}
+                    className="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-sm focus:ring-2 focus:ring-emerald-600 outline-none"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
+                    Status
+                  </label>
+                  <select
+                    value={editStatus}
+                    onChange={(e) => setEditStatus(e.target.value as 'ACTIVE' | 'INACTIVE')}
+                    className="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-sm font-semibold focus:ring-2 focus:ring-emerald-600 outline-none"
+                  >
+                    <option value="ACTIVE">ACTIVE</option>
+                    <option value="INACTIVE">INACTIVE</option>
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
+                  Guardian Contact (Optional)
+                </label>
+                <input
+                  type="text"
+                  placeholder="+254 712 345 678"
+                  value={editGuardian}
+                  onChange={(e) => setEditGuardian(e.target.value)}
+                  className="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-sm focus:ring-2 focus:ring-emerald-600 outline-none"
+                />
+              </div>
+
+              <div className="flex justify-end space-x-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setEditingLearner(null)}
+                  disabled={savingEdit}
+                  className="py-2 px-4 text-sm text-slate-600 font-semibold hover:bg-slate-100 rounded-xl transition"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={savingEdit}
+                  className="py-2.5 px-5 bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 text-white font-bold rounded-xl text-sm shadow-md transition"
+                >
+                  {savingEdit ? 'Saving Changes...' : 'Save Student Details'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* CONFIRM DELETE STUDENT MODAL */}
+      {confirmDeleteTarget && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-sm w-full p-6 shadow-2xl border border-slate-200 space-y-4">
+            <div className="flex items-start space-x-3">
+              <div className="w-10 h-10 bg-rose-100 text-rose-700 rounded-full flex items-center justify-center shrink-0">
+                <Trash2 className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-base font-black text-slate-900">
+                  Delete Student Record
+                </h3>
+                <p className="text-sm text-slate-600 mt-1">
+                  Are you sure you want to permanently delete <strong>{confirmDeleteTarget.fullName}</strong> (
+                  <span className="font-mono">{confirmDeleteTarget.digitalId || confirmDeleteTarget.learnerId}</span>)?
+                </p>
+                <p className="text-xs text-slate-500 mt-1">
+                  School: <strong className="text-slate-700">{confirmDeleteTarget.schoolName || 'Sangurur Comprehensive School'}</strong>
+                </p>
+                <p className="text-xs text-rose-800 bg-rose-50 border border-rose-200 rounded-lg p-2.5 mt-2">
+                  This permanently removes the student&apos;s account, cohort enrollments, and daily register history. This action cannot be undone.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex justify-end space-x-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setConfirmDeleteTarget(null)}
+                disabled={deletingId === confirmDeleteTarget.id}
+                className="py-2 px-4 text-sm text-slate-600 font-semibold hover:bg-slate-100 rounded-xl transition"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => executeDeleteLearner(confirmDeleteTarget)}
+                disabled={deletingId === confirmDeleteTarget.id}
+                className="py-2 px-4 bg-rose-600 hover:bg-rose-700 disabled:opacity-50 text-white font-bold rounded-xl text-sm transition shadow-xs"
+              >
+                {deletingId === confirmDeleteTarget.id ? 'Deleting...' : 'Delete Student'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* DIGITAL LEARNER ID CARD MODAL */}
       {idCardTarget && (
         <DigitalIdCardModal

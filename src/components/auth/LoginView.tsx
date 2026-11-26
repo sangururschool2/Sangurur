@@ -23,6 +23,7 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLearnerLoginSuccess }) =
   // Learner form fields
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
+  const [showLearnerPassword, setShowLearnerPassword] = useState(false);
 
   // Teacher form fields
   const [teacherUsername, setTeacherUsername] = useState('');
@@ -60,7 +61,7 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLearnerLoginSuccess }) =
 
     setSubmitting(true);
     try {
-      await loginAsLearner(username.trim(), password.trim());
+      await loginAsLearner(username.trim(), password);
       if (onLearnerLoginSuccess) onLearnerLoginSuccess();
     } catch (err: any) {
       setError(err.message || 'Login failed. Please verify your credentials or ask your teacher.');
@@ -246,6 +247,10 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLearnerLoginSuccess }) =
                     <input
                       type="text"
                       required
+                      autoCapitalize="none"
+                      autoCorrect="off"
+                      spellCheck={false}
+                      autoComplete="username"
                       placeholder="e.g. SG-LRN-2026-001"
                       value={username}
                       onChange={(e) => setUsername(e.target.value)}
@@ -263,13 +268,25 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLearnerLoginSuccess }) =
                       <Lock className="w-4 h-4 text-slate-400" />
                     </div>
                     <input
-                      type="password"
+                      type={showLearnerPassword ? 'text' : 'password'}
                       required
+                      autoCapitalize="none"
+                      autoCorrect="off"
+                      spellCheck={false}
+                      autoComplete="current-password"
                       placeholder="••••••••"
                       value={password}
                       onChange={(e) => setPassword(e.target.value)}
-                      className="w-full pl-9 pr-3 py-2 bg-white/95 border border-slate-300 rounded-xl text-sm focus:ring-2 focus:ring-emerald-600 focus:border-emerald-600 outline-none transition"
+                      className="w-full pl-9 pr-10 py-2 bg-white/95 border border-slate-300 rounded-xl text-sm focus:ring-2 focus:ring-emerald-600 focus:border-emerald-600 outline-none transition"
                     />
+                    <button
+                      type="button"
+                      onClick={() => setShowLearnerPassword((prev) => !prev)}
+                      aria-label={showLearnerPassword ? 'Hide password' : 'Show password'}
+                      className="absolute inset-y-0 right-0 pr-3 flex items-center text-slate-400 hover:text-slate-600"
+                    >
+                      {showLearnerPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    </button>
                   </div>
                   <p className="text-xs text-slate-700 font-medium mt-1">
                     On first login, you will be prompted to set a private password.
@@ -314,6 +331,9 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLearnerLoginSuccess }) =
                       <input
                         type="text"
                         required
+                        autoCapitalize="none"
+                        autoCorrect="off"
+                        spellCheck={false}
                         autoComplete="username"
                         placeholder="e.g. Teacher"
                         value={teacherUsername}
@@ -334,6 +354,9 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLearnerLoginSuccess }) =
                       <input
                         type={showTeacherPassword ? 'text' : 'password'}
                         required
+                        autoCapitalize="none"
+                        autoCorrect="off"
+                        spellCheck={false}
                         autoComplete="current-password"
                         placeholder="••••••••"
                         value={teacherPassword}
